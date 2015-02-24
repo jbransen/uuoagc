@@ -1,0 +1,239 @@
+module {PrintCode} {} {
+import Code
+import Text.PrettyPrint
+}
+
+include "Code.ag"
+
+
+------ Main wrapper ------
+{
+printCode :: Program -> Doc
+printCode = pp_Syn_Program . flip wrap_Program Inh_Program . sem_Program
+}
+
+attr AllCode
+  syn pp use {$+$} {empty} :: Doc
+
+attr AllLists
+  syn pps :: {[Doc]}
+  syn isNil :: Bool
+
+sem AllLists
+  | Cons lhs.pps   = @hd.pp : @tl.pps
+         lhs.isNil = False
+  | Nil  lhs.pps   = []
+         lhs.isNil = True
+
+------ Data types ------
+attr Constructor Constructors
+  inh isFirst :: Bool
+  inh tpname :: String
+  inh asGADT :: Bool
+  syn asGADT use {||} {False} :: Bool
+
+sem Datatype
+  | Datatype lhs.pp = if @cons.asGADT then @loc.gpp else @loc.npp
+             loc.npp = text "data" <+> text @name <+> @params.pp
+                       $+$ nest 2 @cons.pp
+                       $+$ nest 2 (if null @derivings then empty else
+                                   text "deriving" <+> parens (
+                                     hcat $ punctuate comma $ map text @derivings))
+             loc.gpp = text "data" <+> text @name <+> @params.pp <+> text "where"
+                       $+$ nest 2 @cons.pp
+             cons.isFirst = True
+             cons.asGADT = @cons.asGADT
+             cons.tpname = @name
+  | Alias    lhs.pp = text "type" <+> text @name <+> @params.pp <+> equals <+> @tp.pp
+             tp.needsP = False
+             params.needsP = False
+
+sem Constructor
+  | Constructor lhs.asGADT = not @params.isNil
+
+sem Constructors
+  | Cons tl.isFirst = False
+
+sem Constructor
+  | *           loc.sep = char $ if @lhs.isFirst then '=' else '|'
+  | Constructor lhs.pp = if @lhs.asGADT then @loc.gpp else @loc.npp
+                loc.npp = @loc.sep <+> text @name <+> @fields.pp
+                fields.needsP = True
+                loc.gpp = text @name <+> text "::" <+> @tp.pp
+                inst.tp :: CType
+                inst.tp = foldr Fun (CType @lhs.tpname @params.self) @fields.self
+                tp.needsP = False
+  | Record      lhs.pp = @loc.sep <+> (text @name <+> char '{'
+                              $+$ (nest 2 $ vcat $ punctuate comma @fields.pps)
+                              $+$ char '}')
+
+sem RecFun
+  | RecFun tp.needsP = False
+           lhs.pp = text @name <+> text "::" <+> @tp.pp
+
+------ Nice formatting ------
+sem Chunk
+  | Comment lhs.pp = text "--" <+> text @text
+
+sem Chunk
+  | Data    lhs.pp = @dt.pp $+$ text ""
+  | Func    lhs.pp = @func.pp $+$ text ""
+  | TypeFam lhs.pp = @tf.pp $+$ text ""
+  | Pragma  lhs.pp = text @text $+$ text ""
+
+------ Types ------
+attr CType CTypes
+  inh needsP :: Bool
+
+sem CTypes
+  | Cons lhs.pp = @hd.pp <+> @tl.pp
+
+sem CType
+  | CType  lhs.pp = pParens (@lhs.needsP && not @params.isNil) 
+                    $ text @name <+> @params.pp
+           params.needsP = True
+  | Fun    lhs.pp = pParens @lhs.needsP $ @arg.pp <+> text "->" <+> @res.pp
+           arg.needsP = True
+           res.needsP = False
+  | Forall lhs.pp = pParens @lhs.needsP $ 
+                    text "forall" <+> hsep (map text @params) <> char '.' <+> @tp.pp
+           tp.needsP = False
+  | Tuple  lhs.pp = tuple @lhs.needsP @tps.pps
+           tps.needsP = False
+  | List   lhs.pp = char '[' <+> @tp.pp <+> char ']'
+           tp.needsP = False
+
+sem Constructor
+  | Constructor params.needsP = True
+
+sem Datatype
+  | Datatype params.needsP = True
+
+{
+tuple :: Bool -> [Doc] -> Doc
+tuple False [x] = x
+tuple _     xs  = parens . hsep . punctuate comma $ xs
+}
+
+------ Functions ------
+sem Function
+  | Function lhs.pp = text @name <+> text "::" <+> @tp.pp
+                      $+$ vcat [ addWhere w
+                               $ text @name <+> p <+> equals <+> e
+                               | (p,e,w) <- @alts.altpp ]
+             tp.needsP = False
+  | UntypedFun lhs.pp = case @alt.altpp of
+                         (p,e,w) -> addWhere w 
+                                    $ text @name <+> p <+> equals <+> e
+  | Binding lhs.pp      = @pat.pp <+> equals <+> @body.pp
+            body.needsP = False
+
+{
+addWhere :: Maybe Doc -> Doc -> Doc
+addWhere Nothing d = d
+addWhere (Just w) d = d <+> text "where"
+                      $+$ nest 2 w
+}
+
+attr CAlternatives
+  syn altpp use {:} {[]} :: {[(Doc,Doc, Maybe Doc)]}
+
+attr CAlternative
+  syn altpp :: {(Doc,Doc,Maybe Doc)}
+
+sem CAlternative
+  | CAlternative lhs.altpp   = (hsep @args.pps, @body.pp, @loc.wh)
+                 loc.wh      = if @binds.isNil then Nothing else Just @binds.pp
+                 body.needsP = False
+
+sem Pattern
+  | Underscore lhs.pp = char '_'
+  | PatVar   lhs.pp = text @v
+  | PatTuple lhs.pp = tuple False @pats.pps
+  | PatCons  lhs.pp = parens $ text @name <+> hsep @fields.pps
+
+------ Expressions ------
+attr CExpression CExpressions
+  inh needsP :: Bool
+
+sem CExpression
+  | CExpVar   lhs.pp = text @v
+  | CExpBool  lhs.pp = text $ show @b
+  | CExpInfix lhs.pp = pParens @lhs.needsP $ @l.pp <+> text @op <+> @r.pp
+              l.needsP = False
+              r.needsP = False
+  | CExpTuple lhs.pp = tuple @lhs.needsP @exps.pps 
+              exps.needsP = False
+  | CExpApp   lhs.pp = pParens @lhs.needsP $ @func.pp <+> @arg.pp
+              func.needsP = False
+              arg.needsP  = True
+  | CExpIf    lhs.pp = pParens @lhs.needsP $
+                       text "if" <+> @check.pp
+                       $+$ text "then" <+> @true.pp
+                       $+$ text "else" <+> @false.pp
+              check.needsP = False
+              true.needsP  = False
+              false.needsP = False
+  | CExpCase  lhs.pp = text "case" <+> @exp.pp <+> text "of"
+                       $+$ (nest 2 $ vcat $ 
+                            [ p <+> text "->" <+> e
+                            | (p,e,_) <- @alts.altpp])
+              exp.needsP = False
+  | CExpRec   lhs.pp = if null @vals.pps
+                       then text @name
+                       else pParens @lhs.needsP (text @name <+> char '{'
+                              $+$ (nest 2 $ vcat $ punctuate comma @vals.pps)
+                              $+$ char '}')
+  | CExpRecG  lhs.pp     = pParens @lhs.needsP $ text @field <+> @exp.pp
+              exp.needsP = True
+
+{
+pParens :: Bool -> Doc -> Doc
+pParens True  = parens
+pParens False = id
+}
+
+sem RecVal
+  | RecVal lhs.pp = text @name <+> equals <+> @val.pp
+           val.needsP = False
+
+------ Type families ------
+sem TypeFamily
+  | TypeFamily lhs.pp = text "type family" <+> text @name
+                        <+> hsep (map (\x -> text [x])
+                                 $ take @insts.numargs ['a'..])
+                        <+> text "::" <+> @kind.pp
+                        $+$ @insts.pp
+               kind.needsP = False
+               insts.fam = @name
+
+attr Kind
+  inh needsP :: Bool
+
+sem Kind
+  | Star lhs.pp = text "*"
+  | KFun lhs.pp = pParens @lhs.needsP $ @arg.pp <+> text "->" <+> @res.pp
+         arg.needsP = True
+         res.needsP = False
+
+attr TypeInstance TypeInstances
+  inh fam :: String
+  syn numargs :: Int
+
+sem TypeInstances
+  | Nil  lhs.numargs = 0
+  | Cons lhs.numargs = @hd.numargs
+
+sem TypeInstance
+  | TypeInstance args.needsP = True
+                 res.needsP = False
+                 lhs.numargs = @args.length
+                 lhs.pp = text "type instance" <+> text @lhs.fam
+                          <+> hsep @args.pps <+> equals <+> @res.pp
+
+attr CTypes
+  syn length :: Int
+
+sem CTypes
+  | Cons lhs.length = 1 + @tl.length
+  | Nil  lhs.length = 0

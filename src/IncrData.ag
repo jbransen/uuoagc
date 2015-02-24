@@ -1,0 +1,13 @@
+module {IncrData} {} {}
+
+type HOExprs = [ HOExpr ]
+data HOExpr | Const s :: String
+            | Attr  child :: String
+                    att :: String
+            | Constr constr :: String
+                     args :: HOExprs
+            | IfThenElse exp :: HOExpr
+                         true :: HOExpr
+                         false :: HOExpr
+
+deriving HOExpr : Show

@@ -1,0 +1,1046 @@
+module {IncrCompile} {} {
+import Data.Char (isAlphaNum, isSpace, isUpper, toLower)
+import Data.Maybe (fromJust)
+import Data.List (nub)
+import Data.Map (Map)
+import qualified Data.Map as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
+
+import Data
+import IncrData
+import Code
+import Parser
+}
+
+-- Make use of simple compilation
+include "Compile.ag"
+include "IncrData.ag"
+
+------ New main ------
+sem AG
+  | AG lhs.pragmas := "{-# LANGUAGE GADTs, TypeFamilies, RankNTypes, ScopedTypeVariables #-}"
+       loc.datas := [ Comment "Data types" ] ++
+                    @nts.datas ++
+                    [ Comment "Path" ] ++
+                    [ Data $ @loc.path ] ++
+                    [ Comment "Replacement types" ] ++
+                    @loc.datar ++
+                    @loc.repltype
+       lhs.code := Program $ 
+                   (if "--nodata" `elem` @lhs.opts then [] else @loc.datas) ++
+                   [ Comment "Semantic types" ] ++
+                   @nts.semtypes ++
+                   @loc.semtype ++
+                   [ Comment "Semantic functions" ] ++
+                   @nts.semfuns ++
+                   @nts.semrfuns ++
+                   [ Comment "Production semantic functions" ] ++
+                   @nts.prodfunsi
+
+------ Path data type ------
+sem AG
+  | AG loc.path = Datatype path (@loc.end : @loc.conshd :
+                  @loc.constl : @nts.pathcons) @loc.params []
+       loc.end  = Constructor "End" [] @loc.eparams
+       loc.params = [ tpArg "f", tpArg "t" ]
+       loc.eparams = [ tpArg "t", tpArg "t" ]
+       loc.conshd = Constructor "PathL_hd" [CType path @loc.hparams] @loc.lparams
+       loc.constl = Constructor "PathL_tl" [CType path @loc.lparams] @loc.lparams
+       loc.hparams = [tpArg "a", tpArg "t"]
+       loc.lparams = [List (tpArg "a"), tpArg "t"]
+
+attr Nonterminal Nonterminals Alternative Alternatives Child Children
+  syn pathcons use {++} {[]} :: Constructors
+
+attr Child Children Schedules Schedule Step Steps
+  inh alt :: String
+
+sem Alternative
+  | Alternative children.alt = @name
+                schedules.alt = @name
+
+sem Step
+  | HoChild child.alt = error "This should never be evaluated"
+
+sem Child
+  | Child lhs.pathcons = if @tp.isPrim || @lhs.alt == "Cons"
+                         then []
+                         else [ Constructor @loc.pnm @loc.arg @loc.params ]
+          loc.pnm      = pathName @lhs.nt @lhs.alt @name
+          loc.arg      = [ CType path [ @tp.codetp, tpArg "t"] ]
+          loc.params   = [ CType @lhs.nt [], tpArg "t"]
+
+{
+pathName :: String -> String -> String -> String
+pathName _  "Cons" child = "PathL_" ++ child
+pathName nt alt child = nt ++ alt ++ "P_" ++ child
+
+path :: String
+path = "Path"
+
+tpArg :: String -> CType
+tpArg s = CType s []
+}
+
+------ Replacement types ------
+sem AG | AG
+  loc.datar = @loc.listr : @nts.datar
+  loc.listr = Data $ Datatype (replName "List") [
+                Constructor (holeName "List") 
+                  [ CType path [tpArg "top", List (tpArg "a")]] [],
+                Constructor (replCName "List" "Cons") 
+                  [ CType "ar" []
+                  , CType (replName "List") [tpArg "a", tpArg "ar", tpArg "top"] ] [],
+                Constructor (replCName "List" "Nil") [] []
+              ] [tpArg "a", tpArg "ar", tpArg "top"] []
+
+attr Nonterminals Nonterminal
+  syn datar use {++} {[]} :: Chunks
+
+sem Nonterminal | Nonterminal
+  lhs.datar = case @lstTp of
+               Nothing -> [Data $ Datatype (replName @name) (@loc.hole : @alts.conr)
+                             [tpArg "top"] []]
+               Just (NTType t) -> [Data $ Alias (replName @name) [tpArg "top"]
+                                   (CType (replName "List") [tpArg t, CType replType [tpArg t, tpArg "top"], tpArg "top"])]
+               Just (Primitive t) -> [Data $ Alias (replName @name) [tpArg "top"]
+                                     (CType (replName "List") [tpArg t, tpArg t, tpArg "top"])]
+  loc.hole = Constructor (holeName @name) [CType path [tpArg "top", tpArg @name]] []
+
+attr Alternatives Alternative
+  syn conr use {++} {[]} :: Constructors
+
+sem Alternative
+  | Alternative lhs.conr = [Constructor (replCName @lhs.nt @name) @children.fieldr []]
+
+attr Children Child
+  syn fieldr use {++} {[]} :: CTypes
+
+sem Child
+  | Child lhs.fieldr = [@tp.codetpr]
+
+attr Type
+  syn codetpr:: CType
+
+sem Type
+  | Primitive lhs.codetpr = CType @tp []
+  | NTType    lhs.codetpr = CType (replName @tp) [tpArg "top"]
+
+{
+replName :: String -> String
+replName nt = nt ++ "R"
+
+replCName :: String -> String -> String
+replCName _ "Cons" = "ListConsR"
+replCName _ "Nil" = "ListNilR"
+replCName nt c = nt ++ c ++ "R"
+
+lhsNameR :: Bool -> String -> String -> String
+lhsNameR use a nt = "_lhs" ++ (if use then "I" else "O") ++ a ++ "R" ++ nt
+
+chaNameR :: Bool -> String -> String -> String -> String
+chaNameR use c a nt = "_" ++ c ++ (if use then "I" else "O") ++ a ++ "R" ++ nt
+
+locNameR :: String -> String -> String
+locNameR a nt = "_loc_" ++ a ++ "R" ++ nt
+
+attrnameR :: String -> String -> Bool -> String -> String
+attrnameR ""    a _   _ = childName a
+attrnameR "loc" a _   nt = locNameR a nt
+attrnameR "lhs" a use nt = lhsNameR use a nt
+attrnameR c     a use nt = chaNameR use c a nt
+
+holeName :: String -> String
+holeName s = s ++ "_Ref"
+}
+
+------ Type families ------
+sem AG
+  | AG loc.repltype = [TypeFam $ TypeFamily replType Star @nts.rtp]
+       loc.semtype  = [TypeFam $ TypeFamily semType (Star `KFun` Star) @nts.stp]
+
+attr Nonterminals Nonterminal
+  syn rtp use {++} {[]} :: TypeInstances
+  syn stp use {++} {[]} :: TypeInstances
+
+sem Nonterminal | Nonterminal
+  loc.repltp = CType (replName @name) [tpArg "top"]
+  lhs.rtp = [TypeInstance [tpArg @name, tpArg "top"] @loc.repltp]
+  lhs.stp = [TypeInstance [tpArg @name] (CType (semTName @name) [])]
+
+{
+replType :: String
+replType = "ReplType"
+
+semType :: String
+semType = "SemType"
+}
+
+------ Semantic types ------
+attr Nonterminals Nonterminal
+  syn semtypes use {++} {[]} :: Chunks
+
+sem Nonterminal | Nonterminal
+  loc.semTp   := CType @name [] `Fun` CType @loc.t_tp [tpArg "top"]
+  lhs.semtypes = [ Data $ Datatype (semTName @name) @alts.semtypes
+                          [tpArg "top"] []]
+  alts.recFields = [ RecFun (lookupName @name) @loc.lookupt
+                   , RecFun (changeName @name) @loc.chang ] 
+                   ++ map @loc.visf [0.. @visits.length-1]
+                   ++ map @loc.visd [0.. @visits.length-1]
+  loc.rectp = CType (semTName @name) [tpArg "top"]
+  loc.lookupt = Forall ["t"] $
+                Fun @loc.rectp $
+                Fun (CType path [tpArg @name, tpArg "t"]) $
+                (CType semType [tpArg "t", tpArg "top"])
+  loc.chang = Forall ["r"] $
+              Fun @loc.rectp $
+              Fun (Forall ["t"] $ 
+                   Fun (CType path [tpArg "top", tpArg "t"]) $
+                   CType semType [tpArg "t", tpArg "top"]) $
+              Fun (CType path [tpArg @name, tpArg "r"]) $
+              Fun (CType replType [tpArg "r", tpArg "top"]) $
+              @loc.rectp
+  loc.visf = \v -> RecFun (vistName @name v) (@loc.vist v)
+  loc.vist = \v -> Fun @loc.rectp $
+                   @loc.inhtp v $
+                   @loc.pathtp v $
+                   Tuple [
+                   @loc.syntp v,
+                   @loc.rectp ]
+  loc.syntp = \v -> case v `Map.lookup` @visits.synAttrs of
+                     Just lst -> Tuple $ concat $
+                        [ tp : tpsr
+                        | (nm,tp) <- lst
+                        , let us = Map.findWithDefault Set.empty
+                                   (@name,Syn,nm) @lhs.hoAttrs
+                        , let (CType tnm []) = tp -- lazy, works only for ho attrs
+                        , let tpsr = [ CType (replName tnm) [tpArg unt]
+                                     | unt <- Set.toList us ] ]
+                     Nothing  -> Tuple []
+  loc.pathtp = \v -> let syns = Map.findWithDefault [] v @visits.synAttrs
+                         hotps = concat [ zip (Set.toList us) (repeat tp)
+                                 | (nm,tp) <- syns
+                                 , let us = Map.findWithDefault Set.empty
+                                            (@name,Syn,nm) @lhs.hoAttrs
+                                 ]
+                         f (unt,tp) t = (Forall ["t"] $ 
+                                        CType path [tp, tpArg "t"]
+                                        `Fun`
+                                        CType path [tpArg unt, tpArg "t"]) `Fun` t
+                     in  \t -> foldr f t hotps
+  loc.inhtp = \v -> case v `Map.lookup` @visits.inhAttrs of
+                     Just lst -> Fun $ Tuple $ map snd lst
+                     Nothing  -> id
+  loc.visd = \v -> RecFun (visdName @name v) $
+                   CType "Bool" []
+
+attr Alternatives Alternative Schedules Schedule
+  inh vist :: {Int -> CType}
+  inh syntp :: {Int -> CType}
+  inh pathtp :: {Int -> CType -> CType}
+
+attr Alternatives Alternative
+  inh recFields :: RecFuns
+  inh lookupt :: CType
+  inh chang :: CType
+  syn semtypes use {++} {[]} :: Constructors
+
+sem Alternative | Alternative
+  lhs.semtypes = [ Record (semTCons @lhs.nt @name) 
+                   (@lhs.recFields
+                    ++ @children.semtypes
+                    ++ @schedules.semtypes
+                    ++ concat
+                       [ RecFun (intraName @lhs.nt c a) t
+                         : tpsr
+                       | (c,a,t) <- Set.toList @schedules.allIntras
+                       , let dir | c == "lhs" = Inh
+                                 | c == "loc" = Loc
+                                 | otherwise  = Syn
+                       , let Just (NTType cnt) = c `lookup` @loc.childTypes
+                       , let us = Map.findWithDefault Set.empty
+                                  (cnt,dir,a) @lhs.hoAttrs
+                       , let (CType tnm []) = t -- lazy, works only for ho attrs
+                       , let tpsr = [ RecFun (intraNameR @lhs.nt c a unt) $
+                                      CType (replName tnm) [tpArg unt]
+                                    | unt <- Set.toList us ]
+                       ]) ]
+
+
+attr Child Children Steps Step Schedules Schedule
+  syn semtypes use {++} {[]} :: RecFuns
+
+sem Child
+  | Child lhs.semtypes = if @tp.isPrim || (@lhs.isHO && not @lhs.ho)
+                         then [ ]
+                         else if @lhs.isHO
+                         then [ RecFun (childtName @lhs.nt @name) (CType "Maybe" [CType (semTName @tp.nt) [tpArg @tp.nt]]) ]
+                         else [ RecFun (childtName @lhs.nt @name) @tp.t_type ]
+
+attr Child Children
+  syn t_types use {++} {[]} :: CTypes
+
+sem Child
+  | Child lhs.t_types = [@tp.t_type]
+
+attr Type
+  syn t_type :: CType
+
+sem Type
+  | NTType    lhs.t_type = CType (semTName @tp) [ tpArg "top"]
+  | Primitive lhs.t_type = CType @tp []
+
+{
+semRName :: String -> String
+semRName nt = "sem" ++ nt ++ "R"
+
+semTName :: String -> String
+semTName s = "T" ++ s
+
+semTCons :: String -> String -> String
+semTCons s c = "T" ++ s ++ "" ++ c
+
+lookupName :: String -> String
+lookupName s = "t" ++ map toLower s ++ "_lookup"
+
+changeName :: String -> String
+changeName s = "t" ++ map toLower s ++ "_change"
+
+vistName :: String -> Int -> String
+vistName s v = "t" ++ map toLower s ++ "_v" ++ show v
+
+visdName :: String -> Int -> String
+visdName s v = "t" ++ map toLower s ++ "_v" ++ show v ++ "_dirty"
+
+childtName :: String -> String -> String
+childtName s c = "t" ++ map toLower s ++ "_" ++ c
+
+intraName :: String -> String -> String -> String
+intraName s c a = "t" ++ map toLower s ++ "_" ++ c ++ "_" ++ a
+
+intraNameR :: String -> String -> String -> String -> String
+intraNameR s c a nt = "t" ++ map toLower s ++ "_" ++ c ++ "_" ++ a ++ "R" ++ nt
+}
+
+
+------ Semantic replacement functions ------
+attr Nonterminal Nonterminals
+  syn semrfuns use {++} {[]} :: Chunks
+
+sem Nonterminal | Nonterminal
+  loc.repltpt = CType (replName @name) [tpArg "top"]
+  lhs.semrfuns = [Func $ Function (semRName @name) @loc.semrTp 
+                                  (@loc.lualt : @alts.altsr) ]
+  loc.semrTp = (Forall ["t"] $ CType path [tpArg "top", tpArg "t"] 
+                `Fun` CType semType [tpArg "t", tpArg "top"] )
+                `Fun` (@loc.repltpt `Fun` CType @loc.t_tp [tpArg "top"])
+  loc.lualt = CAlternative [PatVar "lu", PatCons (holeName @loc.holepat) [PatVar "p"]]
+                            (CExpVar "lu" `CExpApp` CExpVar "p") []
+  loc.holepat = maybe @name (const "List") @lstTp
+
+attr Alternative Alternatives
+  syn altsr use {++} {[]} :: CAlternatives
+
+sem Alternative
+  | Alternative lhs.altsr = [CAlternative @loc.patr @loc.expr []]
+                loc.expr  = foldl CExpApp (CExpVar $ semCName @lhs.nt @name)
+                                 @children.wrap_childsr
+                loc.patr  = [PatVar "lu", PatCons (replCName @lhs.nt @name) $ map PatVar @children.childnames]
+
+attr Children Child
+  syn wrap_childsr use {++} {[]} :: CExpressions
+attr Type
+  syn wrap_childsr :: {CExpression -> CExpression}
+
+sem Child
+  | Child lhs.wrap_childsr = [@tp.wrap_childsr $ CExpVar @name]
+
+sem Type
+  | Primitive lhs.wrap_childsr = id
+  | NTType    lhs.wrap_childsr = \n -> CExpVar (semRName @tp) `CExpApp` CExpVar "lu" `CExpApp` n
+
+------ Production semantic functions ------
+attr Nonterminal Nonterminals Alternative Alternatives
+  syn prodfunsi use {++} {[]} :: Chunks
+
+sem Alternative
+  | Alternative lhs.prodfunsi = [ Func $ Function (semCName @lhs.nt @name) @loc.pftp
+                                 [ CAlternative @loc.args @loc.body
+                                   (@loc.lookup : @loc.change : @loc.updates
+                                   ++ @schedules.visfs
+                                   ++ @schedules.realvs) ] ]
+                loc.t_type = CType (semTName @lhs.nt) [tpArg "top"]
+                loc.pftp = Forall ["top"] $
+                           foldr Fun @loc.t_type
+                           @children.t_types
+                loc.args = map PatVar @children.argnms
+                loc.body = CExpRec (semTCons @lhs.nt @name) $ [
+                           RecVal (lookupName @lhs.nt) (CExpVar "lookup"),
+                           RecVal (changeName @lhs.nt) (CExpVar "change")]
+                           ++ [ RecVal (vistName @lhs.nt v) (CExpVar $ "v" ++ show v)
+                              | v <- [0 .. @lhs.nvisits-1]]
+                           ++ [ RecVal (visdName @lhs.nt v) (CExpBool True)
+                              | v <- [0 .. @lhs.nvisits-1]]
+                           ++ [ RecVal (childtName @lhs.nt c)
+                                       (CExpVar $ childName c)
+                              | c <- @children.ntchildren]
+                           ++ (if @lhs.ho
+                               then [ RecVal (childtName @lhs.nt c)
+                                       (CExpVar "Nothing")
+                                    | c <- @schedules.hochildren ]
+                               else [])
+                           ++ concat
+                              [ RecVal (intraName @lhs.nt c a)
+                                       (CExpVar "undefined")
+                                : tpsr
+                              | (c,a,_) <- Set.toList @schedules.allIntras
+                              , let dir | c == "lhs" = Inh
+                                        | c == "loc" = Loc
+                                        | otherwise  = Syn
+                              , let Just (NTType cnt) = c `lookup` @loc.childTypes
+                              , let us = Map.findWithDefault Set.empty
+                                         (cnt,dir,a) @lhs.hoAttrs
+                              , let tpsr = [ RecVal (intraNameR @lhs.nt c a unt) $
+                                             (CExpVar "undefined")
+                                           | unt <- Set.toList us ] ]
+
+attr Alternatives Alternative
+  inh nvisits :: Int
+
+sem Nonterminal
+  | Nonterminal alts.nvisits = @visits.length
+
+------ Change ------
+sem Alternative | Alternative
+  loc.change = Function "change" @lhs.chang @loc.chalts
+  loc.chalts = @loc.chend : @children.chalts
+  loc.chend  = CAlternative [PatVar "cur", PatVar "lu", PatVar "End", PatVar "repl"]
+               (@lhs.tickAG (CExpVar (semRName @lhs.nt) `CExpApp` CExpVar "lu" `CExpApp` CExpVar "repl")) []
+
+attr Child Children
+  syn chalts use {++} {[]} :: CAlternatives
+
+sem Child | Child
+  lhs.chalts = if @tp.isPrim 
+               then []
+               else [ CAlternative [PatVar "cur", PatVar "lu",
+                                    PatCons @loc.pnm [PatVar "ps"], PatVar "repl"]
+                      (@lhs.tickAG @loc.chalt) [] ]
+  loc.chalt  = CExpVar ("update_" ++ @name) `CExpApp` CExpVar "ps"
+               `CExpApp` CExpRec "cur" [ RecVal (childtName @lhs.nt @name) (
+               CExpRecG (changeName @tp.nt) @loc.chlu `CExpApp` @loc.chlu 
+               `CExpApp` CExpVar "lu" `CExpApp` CExpVar "ps" `CExpApp` CExpVar "repl"
+               ) ]
+
+
+------ Lookup ------
+attr Child Children
+  syn lualts use {++} {[]} :: CAlternatives
+
+sem Alternative | Alternative
+  loc.lookup = Function "lookup" @lhs.lookupt @loc.lualts
+  loc.lualts = @loc.luend : @children.lualts
+  loc.luend = CAlternative [PatVar "cur", PatVar "End"]
+              (@lhs.tickAG $ CExpVar "cur") []
+
+sem Child
+  | Child lhs.lualts = if @tp.isPrim
+                       then []
+                       else [ CAlternative 
+                              [PatVar "cur", PatCons @loc.pnm [PatVar "ps"]]
+                              (@lhs.tickAG @loc.lualt) [] ]
+          loc.chlu = CExpRecG (childtName @lhs.nt @name) (CExpVar "cur")
+          loc.lualt  = CExpRecG (lookupName @tp.nt) @loc.chlu
+                       `CExpApp` @loc.chlu
+                       `CExpApp` CExpVar "ps"
+
+------ Update ------
+sem Alternative | Alternative
+  loc.update = Function "update" (@loc.t_type `Fun` @loc.t_type)
+               [ CAlternative [PatVar "cur"] 
+               (@lhs.tickAG $
+               (if null @loc.uvals then CExpVar "cur"
+                                   else CExpRec "cur" @loc.uvals)) [] ]
+  loc.uvals = [ RecVal (visdName @lhs.nt v) 
+                (foldl (CExpInfix "||")
+                      (CExpRecG (visdName @lhs.nt v) (CExpVar "cur"))
+                  [ CExpRecG (visdName cnt v)
+                    $ CExpRecG (childtName @lhs.nt c) (CExpVar "cur")
+                  | (c,cnt,v) <- chv
+                  , c `elem` @children.childnames ] -- filter out HO children
+                )
+              | v <- [0 .. @lhs.nvisits-1]
+              , let Just chv = Map.lookup v @schedules.visused
+              , not (null chv) ]
+  loc.updates = @loc.update : [
+                Function ("update_" ++ c) 
+                (CType "Path" [tpArg "f", tpArg "t"] `Fun` (@loc.t_type `Fun` @loc.t_type))
+                [ CAlternative [PatVar "End", PatVar "cur"] (
+                  @lhs.tickAG (CExpRec "cur"
+                  [ RecVal (visdName @lhs.nt v) (CExpBool True)
+                  | v <- [0 .. @lhs.nvisits-1]
+                  -- Todo: improve analysis here for intra attributes
+                  --, let Just chv = Map.lookup v @schedules.visused
+                  --, any (\(c',_,_) -> c' == c) chv
+                  ])) []
+                , CAlternative [Underscore, PatVar "cur"] (@lhs.tickAG (CExpVar "update" `CExpApp` CExpVar "cur")) [] ]
+                | c <- @children.t_childnames]
+
+attr Schedule Schedules
+  syn visused use {Map.union} {Map.empty} :: {Map Int [(String,String,Int)]}
+
+sem Schedule
+  | Schedule lhs.visused = Map.singleton @visit @steps.visused
+
+attr Steps Step
+  syn visused use {++} {[]} :: {[(String,String,Int)]}
+
+sem Step
+  | ChildVisit lhs.visused = [(@childname,@tp.nt,@loc.state)]
+
+
+------ Single visit ------
+attr Schedule Schedules
+  syn visfs use {++} {[]} :: Functions
+  syn realvs use {++} {[]} :: Functions
+
+sem Schedule | Schedule
+  lhs.visfs = [Function ("v" ++ show @visit) (@lhs.vist @visit) [@loc.vis]]
+  loc.vis  = CAlternative ([PatVar "cur"]
+                           ++ map PatVar @loc.inharg
+                           ++ map PatVar @loc.pathargs)
+                          (@lhs.tickAG
+                          (CExpTuple [CExpTuple (map CExpVar @loc.syns), CExpVar "res"]))
+                          @loc.vbinds
+  loc.pathTps = concat $
+                [ map ((,) nm) $ Set.toList us
+                | (nm,tp) <- @loc.synAttrs
+                , let us = Map.findWithDefault Set.empty
+                           (@lhs.nt,Syn,nm) @lhs.hoAttrs
+                ]
+  loc.pathargs = [ "p" ++ unt ++ "_" ++ nm
+                 | (nm,unt) <- @loc.pathTps
+                 ]
+  loc.vbinds = [Binding (PatTuple (PatTuple (map PatVar @loc.syns) : 
+                          [ PatVar c | (c,v) <- @steps.childState]
+                          ++ concat
+                             [ PatVar (attrname c a True)
+                               : tpsr
+                             | (c,a,_) <- @loc.intraDefs
+                             , let dir | c == "lhs" = Inh
+                                       | c == "loc" = Loc
+                                       | otherwise  = Syn
+                             , let Just (NTType cnt) = c `lookup` @lhs.childTypes
+                             , let us = Map.findWithDefault Set.empty
+                                        (cnt,dir,a) @lhs.hoAttrs
+                             , let tpsr = [ PatVar (attrnameR c a True unt)
+                                          | unt <- Set.toList us ]] ))
+                         (@lhs.tickAG (foldl CExpApp
+                         (CExpVar ("realv" ++ show @visit) `CExpApp` CExpTuple [
+                          CExpRecG (childtName @lhs.nt c) (CExpVar "cur")
+                          | (c,v) <- @steps.childState
+                          , @lhs.ho || c `notElem` @steps.hochildren
+                          ]) (map CExpVar @loc.inharg
+                              ++ concat
+                                 [ CExpRecG (intraName @lhs.nt c a) (CExpVar "cur")
+                                 : tpsr
+                                 | (c,a,_) <- @loc.intraNeeds
+                                 , let dir | c == "lhs" = Inh
+                                           | c == "loc" = Loc
+                                           | otherwise  = Syn
+                                 , let Just (NTType cnt) = c `lookup` @lhs.childTypes
+                                 , let us = Map.findWithDefault Set.empty
+                                            (cnt,dir,a) @lhs.hoAttrs
+                                 , let tpsr = [ CExpRecG (intraNameR @lhs.nt c a unt) (CExpVar "cur")
+                                              | unt <- Set.toList us ] ]
+                              ++ map CExpVar @loc.pathargs))),
+                 Binding (PatVar "res") (@lhs.tickAG
+                   (CExpVar "update" `CExpApp`
+                   (CExpRec "cur" $
+                     RecVal (vistName @lhs.nt @visit) (CExpVar $ "memv" ++ show @visit) :
+                     RecVal (visdName @lhs.nt @visit) (CExpBool False) :
+                     [ RecVal (childtName @lhs.nt c)
+                       (if c `elem` @lhs.allHochildren
+                        then CExpVar "Just" `CExpApp` CExpVar c
+                        else CExpVar c)
+                     | (c,v) <- @steps.childState
+                     , @lhs.ho || c `notElem` @steps.hochildren ]
+                     ++ concat
+                        [ RecVal (intraName @lhs.nt c a)
+                                 (CExpVar $ attrname c a True)
+                          : tpsr
+                        | (c,a,_) <- @loc.intraDefs
+                        , let dir | c == "lhs" = Inh
+                                  | c == "loc" = Loc
+                                  | otherwise  = Syn
+                        , let Just (NTType cnt) = c `lookup` @lhs.childTypes
+                        , let us = Map.findWithDefault Set.empty
+                                   (cnt,dir,a) @lhs.hoAttrs
+                        , let tpsr = [RecVal (intraNameR @lhs.nt c a unt)
+                                             (CExpVar $ attrnameR c a True unt)
+                                     | unt <- Set.toList us ] ]))),
+                 @loc.memv]
+  loc.inharg = case @visit `Map.lookup` @lhs.inhAttrs of
+                 Just lst -> ["inh"]
+                 Nothing  -> []
+  loc.memv = Function ("memv" ++ show @visit) (@lhs.vist @visit) [CAlternative
+                    ([PatVar "cur'"]
+                    ++ map (\i -> PatVar (i ++ "'")) @loc.inharg
+                    ++ map (\i -> PatVar (i ++ "'")) @loc.pathargs)
+                    (@lhs.tickAG
+                    (CExpIf ((if null @loc.inharg
+                              then id
+                              else (CExpInfix "&&" 
+                                   (@lhs.tickEQ
+                                   (CExpInfix "==" (CExpVar "inh") (CExpVar "inh'")))))
+                            $ (CExpVar "not" `CExpApp` 
+                               CExpRecG (visdName @lhs.nt @visit) (CExpVar "cur'")))
+                            (CExpTuple [CExpTuple @loc.synsc, CExpVar "cur'"])
+                            ( ( \vcall -> foldl (
+                                     \t p -> t `CExpApp` (CExpVar $ p ++ "'")
+                                ) vcall @loc.pathargs)
+                            $ (if null @loc.inharg
+                               then id
+                               else (`CExpApp` (CExpVar "inh'")))
+                            $ CExpVar ("v" ++ show @visit) `CExpApp` (CExpVar "cur'"))
+                    )) []]
+  loc.chArgs = PatTuple [ maybe (PatVar $ childName c)
+                                (addJust . PatVar . childStName c) v
+                        | (c,_) <- @steps.childState
+                        , let v = c `lookup` @lhs.childState
+                        , let addJust = if c `elem` @lhs.allHochildren
+                                        then \x -> PatCons "Just" [x]
+                                        else id
+                        , @lhs.ho || c `notElem` @steps.hochildren]
+  loc.chRet = [ CExpVar (childStName c v)
+              | (c,v) <- @steps.childState]
+  loc.attrArgs = PatTuple (map (PatVar . lhsName True . fst) @loc.inhAttrs)
+  loc.inhtps = case @visit `Map.lookup` @lhs.inhAttrs of
+                 Just lst -> map snd lst
+                 Nothing -> []
+  loc.chtps = [ if c `elem` @lhs.allHochildren
+                then CType (semTName nt) [tpArg nt]
+                else CType (semTName nt) [tpArg "top"]
+              | (c,_) <- @steps.childState
+              , let Just (NTType nt) = c `lookup` @lhs.childTypes ]
+  loc.chtpsa = [ if c `elem` @lhs.allHochildren
+                 then CType "Maybe" [CType (semTName nt) [tpArg nt]]
+                 else CType (semTName nt) [tpArg "top"]
+               | (c,_) <- @steps.childState
+               , let Just (NTType nt) = c `lookup` @lhs.childTypes
+               , @lhs.ho || c `notElem` @steps.hochildren ]
+  lhs.realvs = [Function ("realv" ++ show @visit) (
+                 foldr Fun (@lhs.pathtp @visit $ 
+                       Tuple (@lhs.syntp @visit : @loc.chtps
+                             ++ concat
+                                [ t : tpsr
+                                | (c,a,t) <- @loc.intraDefs
+                                , let dir | c == "lhs" = Inh
+                                          | c == "loc" = Loc
+                                          | otherwise  = Syn
+                                , let Just (NTType cnt) = c `lookup` @lhs.childTypes
+                                , let us = Map.findWithDefault Set.empty
+                                           (cnt,dir,a) @lhs.hoAttrs
+                                , let (CType tnm []) = t -- lazy, works only for ho attrs
+                                , let tpsr = [ CType (replName tnm) [tpArg unt]
+                                             | unt <- Set.toList us ] ])) $
+                 Tuple @loc.chtpsa : 
+                 (if null @loc.inhtps
+                  then [] 
+                  else [Tuple @loc.inhtps])
+                  ++ concat
+                     [ t : tpsr
+                     | (c,a,t) <- @loc.intraNeeds
+                     , let dir | c == "lhs" = Inh
+                               | c == "loc" = Loc
+                               | otherwise  = Syn
+                     , let Just (NTType cnt) = c `lookup` @lhs.childTypes
+                     , let us = Map.findWithDefault Set.empty
+                                (cnt,dir,a) @lhs.hoAttrs
+                     , let (CType tnm []) = t -- lazy, works only for ho attrs
+                     , let tpsr = [ CType (replName tnm) [tpArg unt]
+                                  | unt <- Set.toList us ] ]
+                 ) [
+                 CAlternative ([@loc.chArgs]
+                              ++ (if null @loc.inhAttrs
+                                  then []
+                                  else [@loc.attrArgs])
+                              ++ concat
+                                 [ PatVar (attrname c a True)
+                                   : tpsr
+                                 | (c,a,_) <- @loc.intraNeeds
+                                 , let dir | c == "lhs" = Inh
+                                           | c == "loc" = Loc
+                                           | otherwise  = Syn
+                                 , let Just (NTType cnt) = c `lookup` @lhs.childTypes
+                                 , let us = Map.findWithDefault Set.empty
+                                            (cnt,dir,a) @lhs.hoAttrs
+                                 , let tpsr = [ PatVar (attrnameR c a True unt)
+                                              | unt <- Set.toList us ] ]
+                                 ++ map PatVar @loc.pathargs)
+                  (CExpTuple $ CExpTuple (map CExpVar @loc.syns) 
+                  : @loc.chRet
+                  ++ concat
+                     [ CExpVar (attrname c a True)
+                       : tpsr
+                     | (c,a,_) <- @loc.intraDefs
+                     , let dir | c == "lhs" = Inh
+                               | c == "loc" = Loc
+                               | otherwise  = Syn
+                     , let Just (NTType cnt) = c `lookup` @lhs.childTypes
+                     , let us = Map.findWithDefault Set.empty
+                                (cnt,dir,a) @lhs.hoAttrs
+                     , let tpsr = [ CExpVar (attrnameR c a True unt)
+                                  | unt <- Set.toList us ]
+                                  ])
+                  @steps.visitsteps
+               ]]
+  loc.syns := concat $ 
+              [ lhsName False nm : vr
+              | (nm,tp) <- @loc.synAttrs
+              , let us = Map.findWithDefault Set.empty
+                           (@lhs.nt,Syn,nm) @lhs.hoAttrs
+              , let vr = [ lhsNameR False nm unt
+                         | unt <- Set.toList us ] ]
+  loc.synsc = concat $
+              [ CExpVar (lhsName False nm) : vr
+              | (nm,tp) <- @loc.synAttrs
+              , let (CType tnm []) = tp
+              , let us = Map.findWithDefault Set.empty
+                           (@lhs.nt,Syn,nm) @lhs.hoAttrs
+              , let vr = [ CExpVar (holeName $ if tnm `Set.member` @lhs.listTps
+                                               then "List"
+                                               else tnm)
+                          `CExpApp` (CExpVar ("p" ++ unt ++ "_" ++ nm) `CExpApp` CExpVar "End")
+                         | unt <- Set.toList us ] ]
+
+sem Step | ChildVisit
+  loc.childnm = CExpVar $ childStName @childname @loc.state
+  loc.pat := PatTuple [
+               PatTuple (concat $ 
+                        [ PatVar (chaName True @childname nm) : pr
+                        | (nm,tp) <- @loc.synAttrs
+                        , let us = Map.findWithDefault Set.empty
+                                  (@tp.nt,Syn,nm) @lhs.hoAttrs
+                        , let pr = [ PatVar (chaNameR True @childname nm unt)
+                                   | unt <- Set.toList us ] ]),
+               PatVar $ childStName @childname (@loc.state + 1) ]
+  loc.body := foldl CExpApp (CExpRecG (vistName @tp.nt @loc.state) @loc.childnm
+                            `CExpApp` @loc.childnm)
+              $ (if null @loc.inhAttrs
+                 then []
+                 else [CExpTuple $ map (CExpVar . chaName False @childname . fst) @loc.inhAttrs])
+                ++ (map (\(nm,unt) ->
+                     let pa = "p" ++ unt ++ "_" ++ nm
+                         ps = Map.findWithDefault (CExpVar "undefined") (@childname,nm) @lhs.hoattruse
+                         b = if pa `elem` @lhs.pathargs
+                             then CExpInfix "." (CExpVar pa) ps
+                             else ps
+                     in  b
+                     ) @loc.cpathTps)
+  -- Path arguments for the child
+  loc.cpathTps =  concat $
+                  [ map ((,) nm) $ Set.toList us
+                  | (nm,tp) <- @loc.synAttrs
+                  , let us = Map.findWithDefault Set.empty
+                             (@tp.nt,Syn,nm) @lhs.hoAttrs
+                  ]
+
+attr Step Steps
+  inh pathargs :: {[String]}
+
+-- Binding for each HO variant of an attribute
+sem Step | SynDecl
+  loc.hos = Map.findWithDefault Set.empty (@lhs.nt,Syn,@attrname) @lhs.hoAttrs
+  loc.extrabinds = [ Binding (PatVar $ lhsNameR False @attrname unt)
+                             (@expr.cexpho unt)
+                   | unt <- Set.toList @loc.hos ]
+  lhs.visitsteps := (Binding @loc.pat (@lhs.tickSem @loc.body)) : @loc.extrabinds
+
+sem Step | InhDecl
+  lhs.visitsteps := [Binding @loc.pat (@lhs.tickSem @loc.body)]
+
+sem Step | LocDecl
+  loc.hos = Map.findWithDefault Set.empty (@lhs.nt,Loc,@attrname) @lhs.hoAttrs
+  loc.extrabinds = [ Binding (PatVar $ locNameR @attrname unt)
+                             (@expr.cexpho unt)
+                   | unt <- Set.toList @loc.hos ]
+  lhs.visitsteps := (Binding @loc.pat (@lhs.tickSem @loc.body)) : @loc.extrabinds
+
+-- Standard translation of HOExpr to CExp
+attr HOExpr
+  syn cexp :: {CExpression}
+
+attr HOExprs
+  syn cexp use {:} {[]} :: {[CExpression]}
+
+sem HOExpr
+  | Const      lhs.cexp = CExpVar @s
+  | Attr       lhs.cexp = CExpVar $ attrname @child @att True
+  | IfThenElse lhs.cexp = CExpIf @exp.cexp @true.cexp @false.cexp
+  | Constr     lhs.cexp = foldl CExpApp (CExpVar @constr) @args.cexp
+
+-- Translation of HOExpr to CExpr for change
+attr Expression HOExpr
+  syn cexpho :: {String -> CExpression}
+
+attr HOExprs
+  syn cexpho use {:} {[]} :: {[String -> CExpression]}
+
+
+sem HOExpr
+  | Const      lhs.cexpho = \nt -> CExpVar @s
+  | Attr       lhs.cexpho = \nt -> CExpVar $ attrnameR @child @att True nt
+  | IfThenElse lhs.cexpho = \nt -> CExpIf @exp.cexp (@true.cexpho nt)
+                                                    (@false.cexpho nt)
+  | Constr     lhs.cexpho = \nt -> let Just cnt = Map.lookup @constr @lhs.consNT
+                                   in  foldl CExpApp (CExpVar $ replCName cnt @constr)
+                                       $ map ($ nt) @args.cexpho
+
+--- All list types
+attr * - AG
+  inh listTps :: {Set String}
+
+attr Nonterminal Nonterminals
+  syn gListTps use {`Set.union`} {Set.empty} :: {Set String}
+
+sem Nonterminal | Nonterminal
+  lhs.gListTps = case @lstTp of
+                   Just _ -> Set.singleton @name
+                   _      -> Set.empty
+
+sem AG | AG
+  nts.listTps = @nts.gListTps
+
+------ Intra attribute analysis ------
+attr Schedule Steps Step
+  inh nextUsed :: {Set (String, String)}
+
+attr Schedules Schedule Steps Step Expression
+  syn curUsed use {`Set.union`} {Set.empty} :: {Set (String, String)}
+
+sem Expression | Expression
+  lhs.curUsed = Set.fromList 
+                [ (c,a) 
+                | Right (c,a) <- @loc.parts
+                , c /= "" -- filter out terminals
+                ]
+
+sem Step | ChildVisit
+  lhs.curUsed = Set.fromList [ (@childname,a) | (a,_) <- @loc.inhAttrs ]
+
+sem Schedules | Cons
+  hd.nextUsed = @tl.curUsed
+
+attr Steps Step
+  syn curDefined use {`Set.union`} {Set.empty} :: {Set (String, String)}
+
+sem Step
+  | SynDecl    lhs.curDefined = Set.singleton ("lhs",@attrname)
+  | InhDecl    lhs.curDefined = Set.singleton (@childname,@attrname)
+  | LocDecl    lhs.curDefined = Set.singleton ("loc",@attrname)
+  | ChildVisit lhs.curDefined = Set.fromList [ (@childname,a) 
+                                             | (a,_) <- @loc.synAttrs ]
+
+sem Schedule | Schedule
+  loc.attrTp = \c a -> case c of
+                  "lhs" -> maybe (error $ @lhs.nt ++ ": " ++ a ++ " not found in inhAttrs (" ++ show @loc.inhAttrs ++ ")") id $
+                           a `lookup` @loc.inhAttrs
+                  "loc" -> error "Type of loc attribute unknown"
+                  _     -> let Just (NTType nt) = c `lookup` @lhs.childTypes
+                               childAttrs = Map.findWithDefault Map.empty nt @lhs.allSynAttrs
+                               combAttrs = concat $ Map.elems childAttrs
+                           in  maybe (error $ a ++ " not found in combAttrs") id $
+                               a `lookup` combAttrs
+  loc.addAttrs = map (\(c,a) -> (c,a,@loc.attrTp c a))
+  loc.curDefined = (Set.fromList [ ("lhs",a) | (a,_) <- @loc.inhAttrs ])
+                   `Set.union` @steps.curDefined
+  loc.intraDefs = @loc.addAttrs $ Set.toList $
+                   @steps.curDefined `Set.intersection` @lhs.nextUsed
+  loc.intraNeeds = @loc.addAttrs $ Set.toList $ 
+                   @steps.curUsed `Set.difference` @loc.curDefined
+                   -- todo: intras for changes
+
+attr Schedule Schedules
+  syn allIntras use {`Set.union`} {Set.empty} :: {Set (String,String,CType)}
+
+sem Schedule | Schedule
+  lhs.allIntras = Set.fromList @loc.intraDefs
+
+------ HO child constructor ------
+sem Child
+  | Child loc.buildho =  \p e -> CExpCase (CExpVar $ childName @name) [
+                            CAlternative [PatCons "Nothing" []] 
+                                         (@tp.wrap_childs e) [],
+                            CAlternative [PatCons "Just" [PatVar "v"]] 
+                             (CExpRecG (changeName @tp.nt) (CExpVar "v")
+                              `CExpApp`
+                              CExpVar "v"
+                              `CExpApp`
+                              (CExpRecG (lookupName @tp.nt) (CExpVar "v")
+                               `CExpApp` CExpVar "v")
+                              `CExpApp`
+                              CExpVar "End"
+                              `CExpApp`
+                              (case p of
+                                [Right (c,a)] -> CExpVar (attrnameR c a True @tp.nt)
+                                _             -> error "TODO: HO child must be attribute reference"
+                              )
+                             ) []
+                            ]
+          lhs.buildho := if @lhs.ho
+                         then @loc.buildho
+                         else \p e -> @tp.wrap_childs e
+          
+
+------ HO attribute analysis ------
+attr AllData - AG
+  inh ho :: Bool
+
+sem AG
+  | AG loc.ho = "--hosupport" `elem` @lhs.opts
+
+attr Expression Step Steps Schedules Schedule Nonterminal Nonterminals Alternative Alternatives
+  inh dependencies :: {Map Attr (Set Attr)}
+  syn gDependencies use {`mergeDeps`} {Map.empty} :: {Map Attr (Set Attr)} 
+
+{
+data AttrTp = Inh | Syn | Loc deriving (Ord, Eq, Show)
+type Attr = (String, AttrTp, String) -- nt, isInh, name
+
+mergeDeps :: (Ord a, Ord b) => Map a (Set b) -> Map a (Set b) -> Map a (Set b)
+mergeDeps = Map.unionWith Set.union
+
+transClosure :: Ord a => Map a (Set a) -> Map a (Set a)
+transClosure m = if next == m then m else transClosure next where
+  next = step m
+  step m = Map.map (Set.foldl Set.union Set.empty . Set.map (\x -> Set.insert x $ Map.findWithDefault Set.empty x m)) m
+}
+
+sem Step
+  | SynDecl lhs.gDependencies = Map.singleton (@lhs.nt, Syn, @attrname) @expr.attrsUsed
+  | InhDecl lhs.gDependencies = let Just (NTType nt) = @childname `lookup` @lhs.childTypes
+                                in  Map.singleton (nt, Inh, @attrname) @expr.attrsUsed
+  | LocDecl lhs.gDependencies = Map.singleton (@lhs.nt, Loc, @attrname) @expr.attrsUsed
+
+sem HOExpr HOExprs
+  inh nt :: String
+  inh childTypes :: {[(String, Type)]}
+
+attr Expression HOExpr HOExprs
+  syn attrsUsed use {`Set.union`} {Set.empty} :: {Set (String, AttrTp, String)}
+
+sem HOExpr
+  -- For if then else we ignore the if part because that can usually
+  -- not be computed incrementally
+  | IfThenElse lhs.attrsUsed = @true.attrsUsed `Set.union` @false.attrsUsed
+  | Attr lhs.attrsUsed = case @child of
+                           "lhs" -> Set.singleton (@lhs.nt, Inh, @att)
+                           "loc" -> Set.singleton (@lhs.nt, Loc, @att)
+                           ""    -> Set.empty
+                           _     -> Set.singleton (nt, Syn, @att) where
+                              nt = case @child `lookup` @lhs.childTypes of
+                                     Just (NTType nt) -> nt
+                                     _ -> error $ "Tried looking up " ++ show @child
+
+sem AG
+  | AG nts.dependencies = transClosure @nts.gDependencies
+
+-- Map for each attribute to all higher-order types it appears in
+attr Step Steps Schedule Schedules Alternative Alternatives Nonterminal Nonterminals
+  syn ghoAttrs use {`mergeDeps`} {Map.empty} :: {Map (String, AttrTp ,String) (Set String)}
+  inh hoAttrs :: {Map (String, AttrTp, String) (Set String)} -- nt, tp, name
+
+sem Step | HoChild 
+  lhs.ghoAttrs = Map.fromList $
+                 map (\a -> (a,Set.singleton @child.cnt)) $
+                 Set.toList $
+                 Set.unions $
+                 map (\x -> Set.insert x $ 
+                            Map.findWithDefault Set.empty x @lhs.dependencies) $
+                 Set.toList @expr.attrsUsed
+
+sem AG | AG nts.hoAttrs = if @loc.ho then @nts.ghoAttrs else Map.empty
+
+-- Children for each constructor
+attr Nonterminal Nonterminals Alternative Alternatives
+  syn gConsChildnames use {`Map.union`} {Map.empty} :: {Map String [String]}
+
+attr * - AG
+  inh consChildnames :: {Map String [String]}
+
+sem Alternative
+  | Alternative lhs.gConsChildnames = Map.singleton @name @children.childnames
+
+sem AG
+  | AG nts.consChildnames = @nts.gConsChildnames
+
+-- Nonterminal for each constructor
+attr Nonterminal Nonterminals Alternative Alternatives
+  syn gConsNT use {`Map.union`} {Map.empty} :: {Map String String}
+
+attr * - AG
+  inh consNT :: {Map String String}
+
+sem Alternative
+  | Alternative lhs.gConsNT = Map.singleton @name @lhs.nt
+
+sem AG
+  | AG nts.consNT = @nts.gConsNT
+
+-- Parsing expressions that build up higher-order attributes
+attr Expression HOExpr Steps Step
+  syn gHoattruse use {`Map.union`} {Map.empty} :: {Map (String,String) (CExpression)}
+
+attr Steps Step
+  inh hoattruse :: {Map (String,String) (CExpression)}
+
+sem Schedule | Schedule
+  steps.hoattruse = @steps.gHoattruse
+
+attr HOExprs
+  syn gHoattruse use {:} {[]} :: {[Map (String,String) (CExpression)]}
+
+sem Expression
+  | Expression inst.hoexpr :: HOExpr
+               inst.hoexpr = parseHOExpr @exp
+               lhs.gHoattruse = @hoexpr.gHoattruse
+
+sem HOExpr
+  | Const  lhs.gHoattruse = Map.empty
+  | Attr   lhs.gHoattruse = Map.singleton (@child,@att) (CExpVar "id")
+  | IfThenElse
+           loc.keys       = Map.keysSet @true.gHoattruse
+                            `Set.union`
+                            Map.keysSet @false.gHoattruse
+           lhs.gHoattruse = Map.fromList [
+                              (k, CExpIf @exp.cexp pt pf)
+                            | k <- Set.toList @loc.keys
+                            , let pt = Map.findWithDefault (CExpVar "id") k @true.gHoattruse
+                            , let pf = Map.findWithDefault (CExpVar "id") k @false.gHoattruse ]
+  | Constr loc.chnames    = Map.findWithDefault [] @constr @lhs.consChildnames
+           lhs.gHoattruse = Map.unions [
+                              Map.map (
+                                 (CExpInfix ".")
+                                 (CExpVar $ pathName nt @constr ch) ) mp
+                              | (ch,mp) <- zip @loc.chnames @args.gHoattruse
+                              , let nt = Map.findWithDefault (error "Constructor " ++ @constr ++ " not found") @constr @lhs.consNT ]
+
+-- Ticks
+attr AllData - AG
+  inh tickAG  :: {CExpression -> CExpression}
+  inh tickSem :: {CExpression -> CExpression}
+  inh tickEQ  :: {CExpression -> CExpression}
+
+sem AG
+  | AG nts.tickAG  = if "--ticks" `elem` @lhs.opts
+                     then CExpApp (CExpVar "tickAG")
+                     else id
+       nts.tickSem = if "--ticks" `elem` @lhs.opts
+                     then CExpApp (CExpVar "tickSem")
+                     else id
+       nts.tickEQ  = if "--ticks" `elem` @lhs.opts
+                     then CExpApp (CExpVar "tickEQ")
+                     else id

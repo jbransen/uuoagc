@@ -1,0 +1,125 @@
+module {Code} {} {}
+
+data Program | Program chunks :: Chunks
+
+data Chunk | Data    dt   :: Datatype
+           | Comment text :: String
+           | Func    func :: Function
+           | TypeFam tf   :: TypeFamily
+           | Pragma  text :: String
+
+type Chunks = [Chunk]
+
+data Datatype
+   | Datatype name   :: String
+              cons   :: Constructors
+              params :: CTypes
+              derivings :: {[String]}
+   | Alias    name   :: String
+              params :: CTypes
+              tp     :: CType
+
+data Constructor
+   | Constructor name   :: String
+                 fields :: CTypes
+                 params :: CTypes -- type params
+   | Record      name   :: String
+                 fields :: RecFuns
+
+type Constructors = [Constructor]
+
+data RecFun
+   | RecFun name :: String
+            tp   :: CType
+
+type RecFuns = [RecFun]
+
+data TypeFamily
+   | TypeFamily name :: String
+                kind :: Kind
+                insts :: TypeInstances
+
+data TypeInstance
+   | TypeInstance args :: CTypes
+                  res :: CType
+
+type TypeInstances = [TypeInstance]
+
+data CType
+   | CType name    :: String
+           params  :: CTypes
+   | Fun   arg     :: CType
+           res     :: CType
+   | Forall params :: {[String]}
+            tp     :: CType
+   | Tuple tps     :: CTypes
+   | List  tp      :: CType
+
+type CTypes = [CType]
+
+data Kind
+   | Star
+   | KFun arg :: Kind
+          res :: Kind
+
+data Function
+   | Function   name :: String
+                tp   :: CType
+                alts :: CAlternatives
+   | UntypedFun name :: String
+                alt  :: CAlternative
+   | Binding    pat  :: Pattern
+                body :: CExpression
+
+type Functions = [Function]
+
+data CAlternative
+   | CAlternative args  :: Patterns
+                  body  :: CExpression
+                  binds :: Functions -- Where
+
+type CAlternatives = [CAlternative]
+
+data Pattern
+   | Underscore
+   | PatVar    v      :: String
+   | PatTuple  pats   :: Patterns
+   | PatCons   name   :: String
+               fields :: Patterns
+
+type Patterns = [Pattern]
+
+data CExpression
+   | CExpVar    v     :: String
+   | CExpBool   b     :: Bool
+   | CExpInfix  op    :: String
+                l     :: CExpression
+                r     :: CExpression
+   | CExpTuple  exps  :: CExpressions
+   | CExpIf     check :: CExpression
+                true  :: CExpression
+                false :: CExpression
+   | CExpCase   exp   :: CExpression
+                alts  :: CAlternatives
+   | CExpApp    func  :: CExpression
+                arg   :: CExpression
+   | CExpRec    name  :: String
+                vals  :: RecVals
+   | CExpRecG   field :: String -- Get field from record
+                exp   :: CExpression
+
+type CExpressions = [CExpression]
+
+data RecVal
+   | RecVal name :: String
+            val  :: CExpression
+
+type RecVals = [RecVal]
+                
+set AllCode = Program Chunk Chunks Datatype Constructor Constructors CTypes CType Function Functions CAlternative CAlternatives Pattern Patterns CExpression CExpressions TypeFamily TypeInstance TypeInstances Kind RecFun RecFuns RecVal RecVals
+
+set AllLists = Chunks Constructors CTypes CAlternatives Patterns CExpressions Functions TypeInstances RecFuns RecVals
+
+deriving AllCode : Show
+deriving CType : Eq
+deriving CType : Ord

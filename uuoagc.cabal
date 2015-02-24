@@ -1,0 +1,11 @@
+name:                uuoagc
+version:             0.1.0.0
+author:              Jeroen Bransen
+build-type:          Custom
+cabal-version:       >=1.8
+
+executable uuoagc
+  hs-source-dirs:      src
+  main-is:             Main.hs
+  other-modules:       Parser, Data, Compile, Code, PrintCode, IncrData, IncrCompile
+  build-depends:       base, uuagc, uuagc-cabal, containers, uu-parsinglib, pretty, mtl

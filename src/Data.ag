@@ -1,0 +1,73 @@
+module {Data} {} {}
+
+data AG
+   | AG nts :: Nonterminals
+        code :: String
+
+type Nonterminals = [ Nonterminal ]
+
+data Nonterminal
+   | Nonterminal name   :: String
+                 lstTp  :: {Maybe Type}
+                 visits :: Visits
+                 alts   :: Alternatives
+
+type Visits = [ Visit ]
+
+data Visit
+   | Visit visit :: Int
+           attrs :: Attributes
+
+type Attributes = [ Attribute ]
+
+data Attribute
+   | Inherited   name :: String
+                 tp   :: Type
+   | Synthesized name :: String
+                 tp   :: Type
+
+type Alternatives = [ Alternative ]
+
+data Alternative
+   | Alternative name      :: String
+                 children  :: Children
+                 schedules :: Schedules
+
+type Children = [ Child ]
+
+data Child
+   | Child name :: String
+           tp   :: Type
+
+type Schedules = [ Schedule ]
+
+data Schedule
+   | Schedule visit :: Int
+              steps :: Steps
+
+type Steps = [ Step ]
+
+data Step
+   | ChildVisit childname :: String
+   | SynDecl    attrname  :: String
+                expr      :: Expression
+   | InhDecl    childname :: String
+                attrname  :: String
+                expr      :: Expression
+   | LocDecl    attrname  :: String
+                expr      :: Expression
+   | HoChild    child     :: Child
+                expr      :: Expression
+
+data Type
+   | Primitive tp :: String
+   | NTType    tp :: String
+
+data Expression
+   | Expression exp :: String
+
+set AllData = AG Nonterminal Nonterminals Visit Visits
+              Attribute Attributes Alternative Alternatives
+              Child Children Schedule Schedules Step Steps Type Expression
+
+deriving AllData : Show

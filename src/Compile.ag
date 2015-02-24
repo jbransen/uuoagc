@@ -1,0 +1,460 @@
+module {Compile} {compile}
+{
+import Data.Char (isAlphaNum, isSpace)
+import Data.Maybe (fromJust)
+import Data.Map (Map)
+import qualified Data.Map as Map
+
+import Data
+import Code
+}
+
+include "Data.ag"
+
+------ Main wrapper ------
+{
+compile :: [String] -> AG -> (Program, String)
+compile opts ag = (code_Syn_AG res, pragmas_Syn_AG res) where
+  res = wrap_AG (sem_AG ag) (Inh_AG opts)
+}
+
+------ Main wrapper ------
+attr AG
+  inh opts :: {[String]}
+  syn code :: Program
+  syn pragmas :: String
+
+sem AG
+  | AG lhs.pragmas = ""
+       loc.datas = [ Comment "Data types" ] ++
+                   @nts.datas
+       lhs.code = Program $
+                  (if "--nodata" `elem` @lhs.opts then [] else @loc.datas) ++
+                  [ Comment "Types" ] ++
+                  @nts.visittypes ++
+                  [ Comment "Semantic functions" ] ++
+                  @nts.semfuns ++
+                  [ Comment "Production semantic functions" ] ++
+                  @nts.prodfuns
+
+------ General info ------
+attr Alternatives Alternative Children Child Schedules Schedule Steps Step Expression
+  inh nt :: String
+
+sem Nonterminal
+  | Nonterminal alts.nt = @name
+
+attr Attribute Attributes
+  inh visit :: Int
+
+sem Visit
+  | Visit attrs.visit = @visit
+
+-- Defines inherited and synthesized attributes
+attr Alternatives Alternative Schedules Schedule
+  inh inhAttrs :: {AttrMap}
+  inh synAttrs :: {AttrMap}
+
+attr Visits Visit Attributes Attribute
+  syn inhAttrs use {`combConcat`} {Map.empty} :: {AttrMap}
+  syn synAttrs use {`combConcat`} {Map.empty} :: {AttrMap}
+
+{
+type AttrMap = Map Int [(String,CType)]
+
+combConcat :: AttrMap -> AttrMap -> AttrMap
+combConcat = Map.unionWith (++)
+}
+
+sem Attribute
+  | Synthesized lhs.synAttrs = Map.singleton @lhs.visit [(@name,@tp.codetp)]
+  | Inherited   lhs.inhAttrs = Map.singleton @lhs.visit [(@name,@tp.codetp)]
+
+-- Inherited and synthesized attributes per nonterminal
+attr Nonterminal Nonterminals
+  syn gAllInhAttrs use {`Map.union`} {Map.empty} :: {Map String AttrMap}
+  syn gAllSynAttrs use {`Map.union`} {Map.empty} :: {Map String AttrMap}
+
+attr * - AG
+  inh allInhAttrs :: {Map String AttrMap}
+  inh allSynAttrs :: {Map String AttrMap}
+
+sem Nonterminal
+  | Nonterminal lhs.gAllInhAttrs = Map.singleton @name @visits.inhAttrs
+                lhs.gAllSynAttrs = Map.singleton @name @visits.synAttrs
+
+sem AG
+  | AG nts.allInhAttrs = @nts.gAllInhAttrs
+       nts.allSynAttrs = @nts.gAllSynAttrs
+
+-- Types of children
+attr Schedule Schedules Steps Step Expression
+  inh childTypes :: {[(String, Type)]}
+
+attr Children Child Schedules Schedule Steps Step
+  syn gchildTypes use {++} {[]} :: {[(String, Type)]}
+
+attr Type
+  syn copy :: self
+
+sem Child
+  | Child lhs.gchildTypes = [(@name, @tp.copy)]
+
+sem Alternative
+  | Alternative loc.childTypes = @children.gchildTypes ++ @schedules.gchildTypes
+                schedules.childTypes = @loc.childTypes
+
+------ Generate data ------
+attr Nonterminals Nonterminal
+  syn datas use {++} {[]} :: Chunks
+
+sem Nonterminal | Nonterminal
+  lhs.datas = case @lstTp of
+                 Nothing -> [Data $ Datatype @name @alts.cons [] ["Eq", "Ord", "Show"]]
+                 Just (NTType t) -> [Data $ Alias @name [] $ List $ CType t [] ]
+                 Just (Primitive t) -> [Data $ Alias @name [] $ List $ CType t [] ]
+
+attr Alternatives Alternative
+  syn cons use {++} {[]} :: Constructors
+
+sem Alternative
+  | Alternative lhs.cons = [Constructor @name @children.fields []]
+
+attr Children Child
+  syn fields use {++} {[]} :: CTypes
+
+sem Child
+  | Child lhs.fields = [@tp.codetp]
+
+------ Generate semantic functions ------
+attr Nonterminal Nonterminals
+  syn semfuns use {++} {[]} :: Chunks
+
+sem Nonterminal | Nonterminal
+  lhs.semfuns = case @lstTp of
+                  Nothing -> [Func $ Function (semName @name) @loc.semTp @alts.alts ]
+                  Just t -> [Func $ Function (semName @name) @loc.semTp [
+                             CAlternative [] (
+                             (case t of
+                               NTType t -> \v -> CExpInfix "." v
+                                 (CExpVar "map" `CExpApp` CExpVar (semName t))
+                               Primitive t -> id)
+                             (CExpVar "foldr" 
+                             `CExpApp` CExpVar (semCName @name "Cons")
+                             `CExpApp` CExpVar (semCName @name "Nil"))
+                             ) []
+                             ] ]
+
+attr Alternative Alternatives
+  syn alts use {++} {[]} :: CAlternatives
+
+sem Alternative
+  | Alternative lhs.alts = [CAlternative @loc.pat @loc.exp []]
+                loc.exp  = foldl CExpApp (CExpVar $ semCName @lhs.nt @name)
+                                 @children.wrap_childs
+                loc.pat  = [PatCons @name $ map PatVar @children.childnames]
+
+attr Children Child
+  syn wrap_childs use {++} {[]} :: CExpressions
+attr Type
+  syn wrap_childs :: {CExpression -> CExpression}
+
+sem Child
+  | Child lhs.wrap_childs = [@tp.wrap_childs $ CExpVar @name]
+
+sem Type
+  | Primitive lhs.wrap_childs = id
+  | NTType    lhs.wrap_childs = \n -> CExpVar (semName @tp) `CExpApp` n
+
+attr Children Child
+  syn childnames use {++} {[]} :: {[String]}
+  syn t_childnames use {++} {[]} :: {[String]}
+
+sem Child
+  | Child lhs.childnames = [@name]
+          lhs.t_childnames = if @tp.isPrim
+                             then []
+                             else [@name]
+
+{
+semName :: String -> String
+semName nt = "sem" ++ nt
+
+semCName :: String -> String -> String
+semCName nt c = "sem" ++ nt ++ "_" ++ c
+}
+
+------ Generate production semantic functions ------
+attr Alternative Alternatives Nonterminal Nonterminals
+  syn prodfuns use {++} {[]} :: Chunks
+
+sem Alternative
+  | Alternative 
+      lhs.prodfuns = [Func $ UntypedFun (semCName @lhs.nt @name)
+                       $ CAlternative (map PatVar @children.argnms)
+                         (foldl CExpApp (CExpVar (visName 0)) 
+                         (map (CExpVar . childName) @children.ntchildren))
+                         @schedules.visitfuns
+                       ]
+
+attr Child Children
+  syn argnms use {++} {[]} :: {[String]}
+
+sem Child
+  | Child lhs.argnms = [childName @name]
+
+
+attr Children Child
+  syn ntchildren use {++} {[]} :: {[String]}
+
+sem Child
+  | Child lhs.ntchildren = if @tp.isPrim then [] else [@name]
+
+attr Child
+  inh isHO :: Bool
+
+sem Children
+  | Cons hd.isHO = False
+
+sem Step
+  | HoChild child.isHO = True
+
+attr Children Child Schedules Schedule Steps Step
+  syn hochildren use {++} {[]} :: {[String]}
+
+sem Child
+  | Child lhs.hochildren = if @lhs.isHO then [@name] else []
+
+attr Schedule Schedules
+  inh allHochildren :: {[String]}
+
+sem Alternative
+  | Alternative schedules.allHochildren = @schedules.hochildren
+
+------ Generate visit functions ------
+attr Schedule Schedules
+  syn visitfuns use {++} {[]} :: Functions
+
+sem Schedule
+  | Schedule loc.inhAttrs = Map.findWithDefault [] @visit @lhs.inhAttrs
+             loc.synAttrs = Map.findWithDefault [] @visit @lhs.synAttrs
+             -- todo: intra visit attributes
+             loc.nextv = foldl CExpApp (CExpVar $ visName (@visit + 1))
+                             [CExpVar (childStName c v) | (c,v) <- @steps.childState]
+             loc.addnextv = if @lhs.isLastVisit 
+                            then id
+                            else (++ [@loc.nextv])
+             loc.ret = CExpTuple $ @loc.addnextv $ map CExpVar @loc.syns
+             loc.syns = map (lhsName False . fst) @loc.synAttrs
+             loc.args = [childStName c v | (c,v) <- @lhs.childState]
+                        ++ (map (lhsName True . fst) @loc.inhAttrs)
+             lhs.visitfuns = [ UntypedFun (visName @visit) 
+                             $ CAlternative 
+                               (map PatVar @loc.args)
+                               @loc.ret
+                               @steps.visitsteps
+                             ]
+
+attr Steps Step
+  syn visitsteps use {++} {[]} :: Functions
+
+sem Step
+  | * lhs.visitsteps = [ Binding @loc.pat @loc.body ]
+  | ChildVisit loc.addnextst = if @loc.isLastVisit
+                               then id
+                               else (++ [childStName @childname (@loc.state + 1)])
+               loc.pat = PatTuple $ map PatVar $ @loc.addnextst 
+                                  $ map (chaName True @childname . fst) @loc.synAttrs
+               loc.body = foldl CExpApp (CExpVar $ childStName @childname @loc.state)
+                          $ map (CExpVar . chaName False @childname . fst) @loc.inhAttrs
+  | SynDecl loc.pat  = PatVar $ lhsName False @attrname
+            loc.body = @expr.cexp
+  | InhDecl loc.pat  = PatVar $ chaName False @childname @attrname
+            loc.body = @expr.cexp
+  | LocDecl loc.pat  = PatVar $ locName @attrname
+            loc.body = @expr.cexp
+  | HoChild loc.pat  = PatVar $ childStName @child.name 0
+            loc.body = @child.buildho @expr.parts @expr.cexp
+
+attr Expression
+  syn cexp :: CExpression
+  syn parts :: {[Either String (String,String)]} 
+
+sem Expression
+  | Expression lhs.cexp = let f (Left s)      = CExpVar $ s
+                              f (Right (a,c)) = CExpVar $ attrname a c True
+                          in  foldl1 CExpApp $ map f @loc.parts
+
+
+{
+visName :: Int -> String
+visName n = "v" ++ show n
+
+attrname :: String -> String -> Bool -> String
+attrname ""    a _   = childName a
+attrname "loc" a _   = locName a
+attrname "lhs" a use = lhsName use a
+attrname c     a use = chaName use c a
+
+childName :: String -> String
+childName c = "_" ++ c
+
+childStName :: String -> Int -> String
+childStName c i = c ++ show i
+
+lhsName :: Bool -> String -> String
+lhsName use a = "_lhs" ++ (if use then "I" else "O") ++ a
+
+chaName :: Bool -> String -> String -> String
+chaName use c a = "_" ++ c ++ (if use then "I" else "O") ++ a
+
+locName :: String -> String
+locName a = "_loc_" ++ a
+}
+
+------ Higher order children ------
+attr Child
+  syn buildho :: {[Either String (String,String)] -> CExpression -> CExpression}
+
+sem Child
+  | Child lhs.buildho = const @tp.wrap_childs
+
+------ Child state in visits ------
+attr Schedules Schedule Steps Step
+  chn childState :: {[(String, Int)]}
+
+sem Alternative
+  | Alternative schedules.childState = [ (c,0) | c <- @children.ntchildren ]
+
+sem Step
+  | ChildVisit loc.state   = maybe (error $ @childname ++ " not found.") id $
+                             @childname `lookup` @lhs.childState
+               +childState = update @childname (@loc.state + 1) 
+  | HoChild    +childState = (:) (@child.name,0)
+
+{
+update :: Eq a => a -> b -> [(a,b)] -> [(a,b)]
+update _ _ [] = error "Element not found"
+update a b ((x,y):xs) | a == x = (a,b) : xs
+                      | otherwise = (x,y) : update a b xs
+}
+
+------ Child attributes in childvisit ------
+sem Step
+  | ChildVisit inst.tp :: Type
+               inst.tp = maybe (error $ @childname ++ " not found.") id $
+                         @childname `lookup` @lhs.childTypes
+               tp.visit = @loc.state
+               loc.inhAttrs = @tp.visitInhAttrs
+               loc.synAttrs = @tp.visitSynAttrs
+
+sem Child
+  | Child tp.visit = error "This should not be evaluated"
+
+attr Type
+  inh visit :: Int
+  syn visitInhAttrs :: {[(String,CType)]}
+  syn visitSynAttrs :: {[(String,CType)]}
+
+sem Type
+  | NTType    loc.inhAttrs = Map.findWithDefault Map.empty @tp @lhs.allInhAttrs
+              lhs.visitInhAttrs = Map.findWithDefault [] @lhs.visit @loc.inhAttrs
+              loc.synAttrs = Map.findWithDefault Map.empty @tp @lhs.allSynAttrs
+              lhs.visitSynAttrs = Map.findWithDefault [] @lhs.visit @loc.synAttrs
+  | Primitive lhs.visitInhAttrs = []
+              lhs.visitSynAttrs = []
+
+
+------ Types of evaluators ------
+attr Nonterminal Nonterminals
+  syn visittypes use {++} {[]} :: Chunks
+
+sem Nonterminal
+  | Nonterminal loc.semTp = CType @name [] `Fun` CType @loc.t_tp []
+                lhs.visittypes = [Data $ Alias @loc.t_tp [] @loc.vistp]
+                loc.t_tp = "T" ++ @name
+                loc.vistp = let addnext v = if v == @visits.length - 1
+                                            then id
+                                            else (++ [vistp (v + 1)])
+                                vistp v = inhtp v (syntp v)
+                                inhtp v d = case v `Map.lookup` @visits.inhAttrs of
+                                   Just lst -> Tuple (map snd lst) `Fun` d
+                                   Nothing  -> d
+                                syntp v = case v `Map.lookup` @visits.synAttrs of
+                                   Just lst -> Tuple $ addnext v $ map snd lst
+                                   Nothing  -> Tuple []
+                            in  vistp 0
+
+------ Misc ------
+attr Type
+  syn codetp :: CType
+  syn isPrim :: Bool
+  syn nt :: String
+
+sem Type
+  | *         lhs.codetp = CType @tp []
+  | Primitive lhs.isPrim = True
+              lhs.nt     = error "This should not be evaluated"
+  | NTType    lhs.isPrim = False
+              lhs.nt     = @tp
+
+attr Schedules Visits
+  syn isNil :: Bool
+  syn length :: Int
+
+sem Schedules Visits
+  | Nil  lhs.isNil  = True
+         lhs.length = 0
+  | Cons lhs.isNil  = False
+         lhs.length = @tl.length + 1
+
+attr Nonterminal Nonterminals
+  syn gnumvisits use {`Map.union`} {Map.empty} :: {Map String Int}
+
+attr * - AG
+  inh numvisits :: {Map String Int}
+
+sem Nonterminal
+  | Nonterminal lhs.gnumvisits = Map.singleton @name @visits.length
+
+sem AG
+  | AG nts.numvisits = @nts.gnumvisits
+
+attr Child
+  syn name :: {String}
+  syn cnt :: {String}
+
+sem Child
+  | Child lhs.name = @name
+          lhs.cnt = @tp.nt
+
+attr Schedule
+  inh isLastVisit :: Bool
+
+sem Schedules
+  | Cons hd.isLastVisit = @tl.isNil
+
+attr Type
+  syn isLastChildVisit :: Bool
+
+sem Step
+  | ChildVisit loc.isLastVisit = @tp.isLastChildVisit
+
+sem Type
+  | Primitive lhs.isLastChildVisit = False
+  | NTType    lhs.isLastChildVisit = @tp `Map.lookup` @lhs.numvisits
+                                     == Just (@lhs.visit + 1)
+
+sem Expression
+  | Expression loc.parts :: {[Either String (String,String)]}
+               loc.parts = parseExp @exp
+{
+parseExp :: String -> [Either String (String,String)]
+parseExp = map f . words where
+  f :: String -> Either String (String,String)
+  f ('@':xs) = let (c,ys) = span isAlphaNum xs in case ys of
+    '.':zs -> Right (c,zs)
+    ""     -> Right ("",c)
+    rest   -> error $ "Error in parseExp: " ++ show rest
+  f xs = Left xs
+}
