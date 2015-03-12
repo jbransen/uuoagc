@@ -1,0 +1,5 @@
+file : "src/Data.ag"
+options : data, haskellsyntax
+
+file : "src/Compile.ag"
+options : catas, semfuns, signatures, wrappers, pretty, haskellsyntax, loag

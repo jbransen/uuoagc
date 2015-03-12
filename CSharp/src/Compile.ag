@@ -1,0 +1,148 @@
+module {Compile} {generateCode} {
+import Prelude hiding (LT, GT, EQ)
+import Data.Map (Map, findWithDefault, empty, fromList)
+import qualified Data.Map as Map
+import Data.Char (ord)
+
+import SSM
+import Data
+}
+
+include "Data.ag"
+
+attr Class MemberL Member StatL Stat ExprL Expr DeclL Decl Const
+  syn code use {++} {[]} :: Code
+
+-- Basic code generation
+sem Class
+  | ClassC lhs.code = [ Bsr "Main", HALT ] ++ @members.code
+
+sem Member
+  | MemberM lhs.code = [ LABEL @name, LINK (length @loc.locs) ]
+                       ++ @loc.annotes ++ @body.code ++ [ UNLINK, RET ]
+
+-- Gather all declared variables in order of appearance (important for params)
+attr DeclL Decl StatL Stat
+  syn declVars use {++} {[]} :: {[String]}
+
+sem Decl
+  | DeclC    lhs.declVars = [ @name ]
+  | DeclInit lhs.declVars = [ @name ]
+
+-- Pass around environment with variable locations
+attr StatL Stat ExprL Expr Decl
+  inh env :: {Map String Int}
+
+sem Member
+  | MemberD decl.env    = empty -- Global variables not supported yet
+  | MemberM body.env    = fromList $ @loc.params ++ @loc.locs
+            loc.params  = zip (reverse @params.declVars) [-2,-3..]
+            loc.locs    = zip @body.declVars [1..]
+            loc.annotes = [ANNOTE MP n n "green" v | (v,n) <- (@loc.params ++ @loc.locs) ]
+
+sem Expr
+  | ExprVar loc.address = findWithDefault (error $ @name ++ " not declared.") @name @lhs.env
+
+sem DeclL
+  | Cons hd.env = empty -- Declarations in decll never need env
+
+-- Get address of variables at runtime
+attr Expr
+  syn address :: Code
+
+sem Expr
+  | ExprVar     lhs.address = [ LDLA @loc.address ]
+  | * - ExprVar lhs.address = error "Not a valid expression"
+
+-- Length of lists
+attr ExprL StatL DeclL
+  syn length :: Int
+
+sem ExprL StatL DeclL
+  | Cons lhs.length = 1 + @tl.length
+  | Nil  lhs.length = 0
+
+-- Generate code for expressions
+sem Const
+  | ConstInt  lhs.code = [ LDC @val ]
+  | ConstBool lhs.code = [ LDC (if @val then 1 else 0) ]
+  | ConstChar lhs.code = [ LDC (ord @val) ]
+
+sem Expr
+  | ExprVar   lhs.code = [ LDL @loc.address ]
+  | ExprOper  lhs.code = case @op of {
+                           "=" -> @right.code ++ [ LDS 0] ++ @left.address ++ [ STA 0] ;
+                           op  -> @left.code ++ @right.code 
+                                  ++ [ findWithDefault (error "Unknown operator")
+                                       op opCodes ]
+                         }
+  | ExprFun   lhs.code = case @name of {
+                           "print" -> @params.code ++ [ LDS 0, TRAP 0 ] ;
+                           _       -> @params.code ++ [Bsr @name] ++ @loc.cleanup ++ [LDR R3]
+                         }
+              loc.cleanup = if @params.length == 0
+                            then []
+                            else [AJS (- @params.length)]
+
+sem Decl
+  | DeclInit inst.stat :: Stat
+             inst.stat = StatExpr (ExprOper "=" (ExprVar @name) @init.copy)
+             lhs.code = @stat.code
+
+-- Generate code for statements
+sem Stat
+  | StatExpr   lhs.code = @expr.code ++ [ pop ]
+  | StatIf     lhs.code = @cond.code ++ [ BRF (@loc.nt + 2) ] ++ @true.code
+                                     ++ [ BRA @loc.nf       ] ++ @false.code
+               loc.nt   = codeSize @true.code
+               loc.nf   = codeSize @false.code
+  | StatWhile  lhs.code = [ BRA @loc.nb ] ++ @body.code
+                          ++ @cond.code ++ [ BRT (-(@loc.nb + @loc.nc + 2)) ]
+               loc.nc   = codeSize @cond.code
+               loc.nb   = codeSize @body.code
+  | StatReturn lhs.code = @expr.code ++ [STR R3, UNLINK, RET]
+
+-- Implement for by desugaring
+attr Expr ExprL Stat StatL Decl Type Const
+  syn copy :: self
+
+sem Stat
+  | StatFor inst.block :: Stat
+            --inst.block = StatCat (StatDecl @init.copy) (StatWhile @cond.copy (StatCat @body.copy (StatExpr @incr.copy)))
+            inst.block = StatBlock [
+                           StatDecl @init.copy,
+                           StatWhile @cond.copy (StatBlock [
+                             @body.copy,
+                             StatExpr @incr.copy
+                           ])
+                         ]
+            lhs.code     = @block.code
+            lhs.declVars = @block.declVars
+
+-- The interface to the AG code
+{
+generateCode :: Class -> Code
+generateCode c = code_Syn_Class (wrap_Class (sem_Class c) Inh_Class)
+}
+
+-- All operators with their SSM counterpart
+{
+opCodes :: Map String Instr
+opCodes
+ = fromList
+     [ ( "+" , ADD )
+     , ( "-" , SUB )
+     , ( "*" , MUL )
+     , ( "/" , DIV )
+     , ( "%" , MOD )
+     , ( "<=", LE  ) 
+     , ( ">=", GE  )
+     , ( "<" , LT  )
+     , ( ">" , GT  )
+     , ( "==", EQ  )
+     , ( "!=", NE  )
+     , ( "&&", AND )
+     , ( "||", OR  )
+     , ( "^" , XOR )
+     ]
+}

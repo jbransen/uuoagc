@@ -1,0 +1,470 @@
+nonterminal Class
+   visit 0
+      syn code :: {Code}
+   alternative ClassC
+      child name :: {String}
+      child members :: MemberL
+      visit 0
+         childvisit members
+         lhs.code = [ Bsr "Main" , HALT ] ++ @members.code
+nonterminal Const
+   visit 0
+      syn code :: {Code}
+      syn copy :: Const
+   alternative ConstInt
+      child val :: {Int}
+      visit 0
+         loc.copy = ConstInt @val
+         lhs.copy = @loc.copy
+         lhs.code = [ LDC @val ]
+   alternative ConstBool
+      child val :: {Bool}
+      visit 0
+         loc.copy = ConstBool @val
+         lhs.copy = @loc.copy
+         lhs.code = [ LDC ( if @val then 1 else 0 ) ]
+   alternative ConstChar
+      child val :: {Char}
+      visit 0
+         loc.copy = ConstChar @val
+         lhs.copy = @loc.copy
+         lhs.code = [ LDC ( ord @val ) ]
+nonterminal Decl
+   visit 0
+      syn copy :: Decl
+      syn declVars :: {[String]}
+   visit 1
+      inh env :: {Map String Int}
+      syn code :: {Code}
+   alternative DeclC
+      child vtype :: Type
+      child name :: {String}
+      visit 0
+         lhs.declVars = [ @name ]
+         childvisit vtype
+         loc.copy = DeclC @vtype.copy @name
+         lhs.copy = @loc.copy
+      visit 1
+         lhs.code = []
+   alternative DeclInit
+      child vtype :: Type
+      child name :: {String}
+      child init :: Expr
+      visit 0
+         lhs.declVars = [ @name ]
+         childvisit vtype
+         childvisit init
+         loc.copy = DeclInit @vtype.copy @name @init.copy
+         lhs.copy = @loc.copy
+      visit 1
+         loc.inst_stat = StatExpr ( ExprOper "=" ( ExprVar @name ) @init.copy )
+         child stat :: Stat = @loc.inst_stat
+         childvisit stat
+         stat.env = @lhs.env
+         childvisit stat
+         lhs.code = @stat.code
+list Decl DeclL
+   visit 0
+      syn code :: {Code}
+      syn declVars :: {[String]}
+      syn length :: {Int}
+   alternative Cons
+      child hd :: Decl
+      child tl :: DeclL
+      visit 0
+         childvisit tl
+         lhs.length = 1 + @tl.length
+         childvisit hd
+         lhs.declVars = @hd.declVars ++ @tl.declVars
+         hd.env = empty
+         childvisit hd
+         lhs.code = @hd.code ++ @tl.code
+   alternative Nil
+      visit 0
+         lhs.length = 0
+         lhs.declVars = []
+         lhs.code = []
+nonterminal Expr
+   visit 0
+      syn copy :: Expr
+   visit 1
+      inh env :: {Map String Int}
+      syn address :: {Code}
+      syn code :: {Code}
+   alternative ExprConst
+      child const :: Const
+      visit 0
+         childvisit const
+         loc.copy = ExprConst @const.copy
+         lhs.copy = @loc.copy
+      visit 1
+         lhs.code = @const.code
+         lhs.address = error "Not a valid expression"
+   alternative ExprVar
+      child name :: {String}
+      visit 0
+         loc.copy = ExprVar @name
+         lhs.copy = @loc.copy
+      visit 1
+         loc.address = findWithDefault ( error $ @name ++ " not declared." ) @name @lhs.env
+         lhs.code = [ LDL @loc.address ]
+         lhs.address = [ LDLA @loc.address ]
+   alternative ExprOper
+      child op :: {String}
+      child left :: Expr
+      child right :: Expr
+      visit 0
+         childvisit left
+         childvisit right
+         loc.copy = ExprOper @op @left.copy @right.copy
+         lhs.copy = @loc.copy
+      visit 1
+         left.env = @lhs.env
+         childvisit left
+         right.env = @lhs.env
+         childvisit right
+         lhs.code = case @op of { "=" -> @right.code ++ [ LDS 0 ] ++ @left.address ++ [ STA 0 ] ; op -> @left.code ++ @right.code ++ [ findWithDefault ( error "Unknown operator" ) op opCodes ] }
+         lhs.address = error "Not a valid expression"
+   alternative ExprFun
+      child name :: {String}
+      child params :: ExprL
+      visit 0
+         childvisit params
+         loc.copy = ExprFun @name @params.copy
+         lhs.copy = @loc.copy
+      visit 1
+         params.env = @lhs.env
+         childvisit params
+         loc.cleanup = if @params.length == 0 then [] else [ AJS ( - @params.length ) ]
+         lhs.code = case @name of { "print" -> @params.code ++ [ LDS 0 , TRAP 0 ] ; _ -> @params.code ++ [ Bsr @name ] ++ @loc.cleanup ++ [ LDR R3 ] }
+         lhs.address = error "Not a valid expression"
+list Expr ExprL
+   visit 0
+      syn copy :: ExprL
+   visit 1
+      inh env :: {Map String Int}
+      syn code :: {Code}
+      syn length :: {Int}
+   alternative Cons
+      child hd :: Expr
+      child tl :: ExprL
+      visit 0
+         childvisit hd
+         childvisit tl
+         loc.copy = (:) @hd.copy @tl.copy
+         lhs.copy = @loc.copy
+      visit 1
+         tl.env = @lhs.env
+         childvisit tl
+         lhs.length = 1 + @tl.length
+         hd.env = @lhs.env
+         childvisit hd
+         lhs.code = @hd.code ++ @tl.code
+   alternative Nil
+      visit 0
+         loc.copy = []
+         lhs.copy = @loc.copy
+      visit 1
+         lhs.length = 0
+         lhs.code = []
+nonterminal Member
+   visit 0
+      syn code :: {Code}
+   alternative MemberD
+      child decl :: Decl
+      visit 0
+         childvisit decl
+         decl.env = empty
+         childvisit decl
+         lhs.code = @decl.code
+   alternative MemberM
+      child rtype :: Type
+      child name :: {String}
+      child params :: DeclL
+      child body :: Stat
+      visit 0
+         childvisit params
+         childvisit body
+         loc.locs = zip @body.declVars [ 1 .. ]
+         loc.params = zip ( reverse @params.declVars ) [ - 2 , - 3 .. ]
+         body.env = fromList $ @loc.params ++ @loc.locs
+         childvisit body
+         loc.annotes = [ ANNOTE MP n n "green" v | ( v , n ) <- ( @loc.params ++ @loc.locs ) ]
+         lhs.code = [ LABEL @name , LINK ( length @loc.locs ) ] ++ @loc.annotes ++ @body.code ++ [ UNLINK , RET ]
+list Member MemberL
+   visit 0
+      syn code :: {Code}
+   alternative Cons
+      child hd :: Member
+      child tl :: MemberL
+      visit 0
+         childvisit hd
+         childvisit tl
+         lhs.code = @hd.code ++ @tl.code
+   alternative Nil
+      visit 0
+         lhs.code = []
+nonterminal Stat
+   visit 0
+      syn copy :: Stat
+      syn declVars :: {[String]}
+   visit 1
+      inh env :: {Map String Int}
+      syn code :: {Code}
+   alternative StatDecl
+      child decl :: Decl
+      visit 0
+         childvisit decl
+         lhs.declVars = @decl.declVars
+         loc.copy = StatDecl @decl.copy
+         lhs.copy = @loc.copy
+      visit 1
+         decl.env = @lhs.env
+         childvisit decl
+         lhs.code = @decl.code
+   alternative StatExpr
+      child expr :: Expr
+      visit 0
+         lhs.declVars = []
+         childvisit expr
+         loc.copy = StatExpr @expr.copy
+         lhs.copy = @loc.copy
+      visit 1
+         expr.env = @lhs.env
+         childvisit expr
+         lhs.code = @expr.code ++ [ pop ]
+   alternative StatIf
+      child cond :: Expr
+      child true :: Stat
+      child false :: Stat
+      visit 0
+         childvisit true
+         childvisit false
+         lhs.declVars = @true.declVars ++ @false.declVars
+         childvisit cond
+         loc.copy = StatIf @cond.copy @true.copy @false.copy
+         lhs.copy = @loc.copy
+      visit 1
+         cond.env = @lhs.env
+         childvisit cond
+         true.env = @lhs.env
+         childvisit true
+         false.env = @lhs.env
+         childvisit false
+         loc.nf = codeSize @false.code
+         loc.nt = codeSize @true.code
+         lhs.code = @cond.code ++ [ BRF ( @loc.nt + 2 ) ] ++ @true.code ++ [ BRA @loc.nf ] ++ @false.code
+   alternative StatWhile
+      child cond :: Expr
+      child body :: Stat
+      visit 0
+         childvisit body
+         lhs.declVars = @body.declVars
+         childvisit cond
+         loc.copy = StatWhile @cond.copy @body.copy
+         lhs.copy = @loc.copy
+      visit 1
+         cond.env = @lhs.env
+         childvisit cond
+         body.env = @lhs.env
+         childvisit body
+         loc.nb = codeSize @body.code
+         loc.nc = codeSize @cond.code
+         lhs.code = [ BRA @loc.nb ] ++ @body.code ++ @cond.code ++ [ BRT ( - ( @loc.nb + @loc.nc + 2 ) ) ]
+   alternative StatFor
+      child init :: Decl
+      child cond :: Expr
+      child incr :: Expr
+      child body :: Stat
+      visit 0
+         childvisit init
+         childvisit cond
+         childvisit incr
+         childvisit body
+         loc.inst_block = StatCat ( StatDecl @init.copy ) ( StatWhile @cond.copy ( StatCat @body.copy ( StatExpr @incr.copy ) ) )
+         child block :: Stat = @loc.inst_block
+         childvisit block
+         lhs.declVars = @block.declVars
+         loc.copy = StatFor @init.copy @cond.copy @incr.copy @body.copy
+         lhs.copy = @loc.copy
+      visit 1
+         block.env = @lhs.env
+         childvisit block
+         lhs.code = @block.code
+   alternative StatReturn
+      child expr :: Expr
+      visit 0
+         lhs.declVars = []
+         childvisit expr
+         loc.copy = StatReturn @expr.copy
+         lhs.copy = @loc.copy
+      visit 1
+         expr.env = @lhs.env
+         childvisit expr
+         lhs.code = @expr.code ++ [ STR R3 , UNLINK , RET ]
+   alternative StatCat
+      child l :: Stat
+      child r :: Stat
+      visit 0
+         childvisit l
+         childvisit r
+         lhs.declVars = @l.declVars ++ @r.declVars
+         loc.copy = StatCat @l.copy @r.copy
+         lhs.copy = @loc.copy
+      visit 1
+         l.env = @lhs.env
+         childvisit l
+         r.env = @lhs.env
+         childvisit r
+         lhs.code = @l.code ++ @r.code
+   alternative StatBlock
+      child stats :: StatL
+      visit 0
+         childvisit stats
+         lhs.declVars = @stats.declVars
+         loc.copy = StatBlock @stats.copy
+         lhs.copy = @loc.copy
+      visit 1
+         stats.env = @lhs.env
+         childvisit stats
+         lhs.code = @stats.code
+list Stat StatL
+   visit 0
+      syn copy :: StatL
+      syn declVars :: {[String]}
+   visit 1
+      inh env :: {Map String Int}
+      syn code :: {Code}
+      syn length :: {Int}
+   alternative Cons
+      child hd :: Stat
+      child tl :: StatL
+      visit 0
+         childvisit hd
+         childvisit tl
+         lhs.declVars = @hd.declVars ++ @tl.declVars
+         loc.copy = (:) @hd.copy @tl.copy
+         lhs.copy = @loc.copy
+      visit 1
+         tl.env = @lhs.env
+         childvisit tl
+         lhs.length = 1 + @tl.length
+         hd.env = @lhs.env
+         childvisit hd
+         lhs.code = @hd.code ++ @tl.code
+   alternative Nil
+      visit 0
+         lhs.declVars = []
+         loc.copy = []
+         lhs.copy = @loc.copy
+      visit 1
+         lhs.length = 0
+         lhs.code = []
+nonterminal Type
+   visit 0
+      syn copy :: Type
+   alternative TypeVoid
+      visit 0
+         loc.copy = TypeVoid
+         lhs.copy = @loc.copy
+   alternative TypePrim
+      child ptype :: {String}
+      visit 0
+         loc.copy = TypePrim @ptype
+         lhs.copy = @loc.copy
+   alternative TypeObj
+      child otype :: {String}
+      visit 0
+         loc.copy = TypeObj @otype
+         lhs.copy = @loc.copy
+   alternative TypeArray
+      child itype :: Type
+      visit 0
+         childvisit itype
+         loc.copy = TypeArray @itype.copy
+         lhs.copy = @loc.copy
+
+
+-- Haskell code
+{-# LANGUAGE CPP #-}
+
+module CompileI where
+
+import Prelude hiding (LT, GT, EQ)
+import Data.Map (Map, findWithDefault, empty, fromList)
+import Data.Char (ord)
+
+#if GATHER_STATS
+import System.IO.Unsafe (unsafePerformIO)
+import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef, IORef)
+#endif
+
+import SSM
+
+generateCode :: Class -> (Code, TClass Class)
+generateCode c = tclass_v0 t t where t = semClass c
+
+generateCode2 :: TClass Class -> [MyInsert phi] -> (Code, TClass Class)
+generateCode2 t ins = tclass_v0 t2 t2 where
+  lu :: forall t. Path Class t -> SemType t Class
+  lu = tclass_lookup t t
+  t2 = foldl (\t (MyInsert _ p r) -> tclass_change t t lu p r) t ins
+
+data MyInsert phi where
+  MyInsert :: forall phi r. phi r -> Path Class r -> ReplType r Class -> MyInsert phi
+
+opCodes :: Map String Instr
+opCodes
+ = fromList
+     [ ( "+" , ADD )
+     , ( "-" , SUB )
+     , ( "*" , MUL )
+     , ( "/" , DIV )
+     , ( "%" , MOD )
+     , ( "<=", LE  ) 
+     , ( ">=", GE  )
+     , ( "<" , LT  )
+     , ( ">" , GT  )
+     , ( "==", EQ  )
+     , ( "!=", NE  )
+     , ( "&&", AND )
+     , ( "||", OR  )
+     , ( "^" , XOR )
+     ]
+
+
+#if GATHER_STATS
+counterSem :: IORef Int
+counterSem = unsafePerformIO $ newIORef 0
+
+counterAG :: IORef Int
+counterAG = unsafePerformIO $ newIORef 0
+
+counterEQ :: IORef Int
+counterEQ = unsafePerformIO $ newIORef 0
+#endif
+
+tickSem, tickAG, tickEQ :: a -> a
+#if GATHER_STATS
+tickSem x = unsafePerformIO $ modifyIORef counterSem succ >> return x
+tickAG x = unsafePerformIO $ modifyIORef counterAG succ >> return x
+tickEQ x = unsafePerformIO $ modifyIORef counterEQ succ >> return x
+#else
+tickSem = id
+tickAG = id
+tickEQ = id
+#endif
+
+printStats, resetStats :: IO ()
+#if GATHER_STATS
+printStats = do
+  s <- readIORef counterSem
+  a <- readIORef counterAG
+  e <- readIORef counterEQ
+  putStrLn $ "Sem = " ++ show s ++ "; AG = " ++ show a ++ "; EQ = " ++ show e
+
+resetStats = writeIORef counterSem 0 >> writeIORef counterAG 0 >> writeIORef counterEQ 0
+#else
+printStats = return ()
+resetStats = return ()
+#endif

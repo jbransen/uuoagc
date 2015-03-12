@@ -1,0 +1,64 @@
+module {Data}{}{}
+
+data Class
+   | ClassC name :: String
+            members :: MemberL
+
+type MemberL = [ Member ]
+
+data Member 
+   | MemberD  decl   :: Decl
+   | MemberM  rtype  :: Type
+              name   :: String
+              params :: DeclL
+              body   :: Stat
+
+type StatL = [ Stat ]
+
+data Stat
+   | StatDecl   decl  :: Decl
+   | StatExpr   expr  :: Expr
+   | StatIf     cond  :: Expr
+                true  :: Stat
+                false :: Stat
+   | StatWhile  cond  :: Expr
+                body  :: Stat
+   | StatFor    init  :: Decl
+                cond  :: Expr
+                incr  :: Expr
+                body  :: Stat
+
+   | StatReturn expr  :: Expr
+   | StatCat    l, r  :: Stat
+   | StatBlock  stats :: StatL
+
+data Const
+   | ConstInt  val   :: Int
+   | ConstBool val   :: Bool
+   | ConstChar val   :: Char
+
+type ExprL = [ Expr ]
+
+data Expr
+   | ExprConst const :: Const
+   | ExprVar   name  :: String
+   | ExprOper  op    :: String
+               left  :: Expr
+               right :: Expr
+   | ExprFun   name  :: String
+               params :: ExprL
+
+type DeclL = [ Decl ]
+
+data Decl
+   | DeclC    vtype :: Type
+              name  :: String
+   | DeclInit vtype :: Type
+              name  :: String
+              init  :: Expr
+
+data Type
+   | TypeVoid
+   | TypePrim  ptype :: String
+   | TypeObj   otype :: String
+   | TypeArray itype :: Type
