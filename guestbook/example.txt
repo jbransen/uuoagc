@@ -1,0 +1,6 @@
+ARRIVE Swierstra
+ARRIVE Bransen
+LEAVE Swierstra - 6 - Nice hotel, but the beds are too short
+ARRIVE Dijkstra
+LEAVE Dijkstra - 8 - The atmosphere is great for taking pictures!
+LEAVE Bransen - 7.6 - I liked the fast internet connection

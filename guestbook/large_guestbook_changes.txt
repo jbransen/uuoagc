@@ -1,0 +1,3 @@
+("delete",19,Ref 20)
+("insert leave",18,LeaveR "SIMPSON" 1.7 "No comment" (Ref 18))
+("insert arrive",10,ArriveR "GUERRERO" (Ref 10))

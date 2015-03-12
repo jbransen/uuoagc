@@ -1,0 +1,136 @@
+module {GuestbookAG} {} {
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Criterion.Main
+}
+
+{
+type Name = String
+}
+
+-- Different representation, directly make list structure
+data Guestbook
+   | Empty
+   | Arrive name   :: Name
+            tl     :: Guestbook
+   | Leave  name   :: Name
+            grade  :: Double
+            review :: String
+            tl     :: Guestbook
+
+-- Signed in guests
+attr Guestbook
+  syn signedIn :: {Set Name}
+
+sem Guestbook
+  | Empty  lhs.signedIn = Set.empty
+  | Arrive lhs.signedIn = @name `Set.insert` @tl.signedIn
+  | Leave  lhs.signedIn = @name `Set.delete` @tl.signedIn
+
+-- True reviews
+attr Guestbook
+  syn trueReviews :: {[Double]}
+
+sem Guestbook
+  | Empty  loc.trueReviews = []
+  | Arrive loc.trueReviews = @tl.trueReviews
+  | Leave  loc.trueReviews = if   @name `Set.member` @tl.signedIn
+                             then @grade : @tl.trueReviews
+                             else          @tl.trueReviews
+
+-- List average
+type DL = [Double]
+
+attr DL
+  syn length  :: Double
+  syn sum     :: Double
+  syn average :: Double
+
+sem DL
+  | Nil  lhs.length = 0
+         lhs.sum = 0
+         lhs.average = 0
+  | Cons loc.length = @tl.length + 1
+         loc.sum = @tl.sum + @hd
+         lhs.average = @loc.sum / @loc.length
+
+-- Average grade
+data Top | Top gb :: Guestbook
+
+attr Top
+  syn average :: {Double}
+
+sem  Top
+  |  Top   inst.revs   :: DL
+           inst.revs   = @gb.trueReviews
+           lhs.average = @revs.average
+
+{
+example1 :: Guestbook
+example1 = Leave "Bransen" 7.6 "I liked the fast internet connection" $ Leave "Dijkstra" 8 "The atmosphere is great for taking pictures!" $ Arrive "Dijkstra" $ Leave "Swierstra" 6 "Nice hotel, but the beds are too short" $ Arrive "Bransen" $ Arrive "Swierstra" Empty
+
+-- Data types
+type MyPath = Int
+
+data MyGuestbookR
+  = Ref MyPath
+  | EmptyR
+  | ArriveR Name MyGuestbookR
+  | LeaveR Name Double String MyGuestbookR
+  deriving (Read, Show)
+
+type Change = (String, Int, MyGuestbookR)
+
+-- Parsing
+parseGuestbook :: String -> Guestbook
+parseGuestbook = parseEntry . lines
+
+parseEntry :: [String] -> Guestbook
+parseEntry [] = Empty
+parseEntry (s:ss) = case words s of
+  ["ARRIVE", n] -> Arrive n $ parseEntry ss
+  ("LEAVE":n:"-":g:"-":cs) -> Leave n (read g) (unwords cs) $ parseEntry ss
+
+parseChanges :: String -> [Change]
+parseChanges = map read . lines
+
+-- Invocation
+computeGrade :: Guestbook -> (Double, TTop Top)
+computeGrade g = ttop_v0 t t where
+  t = semTop $ Top g
+
+computeGradeI :: TTop Top -> (Path Top Guestbook, GuestbookR Top) -> (Double, TTop Top)
+computeGradeI t (p, r) = ttop_v0 t' t' where
+  t' = ttop_change t t (ttop_lookup t t) p r
+
+-- Main
+main :: IO ()
+main = do
+  f <- readFile "large_guestbook.txt"
+  let gb = parseGuestbook f
+  let (g,st) = computeGrade gb
+  print g
+  f2 <- readFile "large_guestbook_changes.txt"
+  let chs = parseChanges f2
+  let chs' = map (translateChanges gb) chs
+  mapM_ (print . fst . computeGradeI st) chs'
+  defaultMain $
+    (bench "initial" $ nf (fst . computeGrade) gb)
+    : [ bench name $ nf (fst . computeGradeI st) ch
+      | ((name,_,_), ch) <- zip chs chs'
+      ]
+
+
+translateChanges :: Guestbook -> Change -> (Path Top Guestbook, GuestbookR Top)
+translateChanges gb (_, p, r) = (trp p, g r) where
+  g :: MyGuestbookR -> GuestbookR Top
+  g (Ref p) = Guestbook_Ref (trp p)
+  g (EmptyR) = GuestbookEmptyR
+  g (ArriveR n t) = GuestbookArriveR n (g t)
+  g (LeaveR n gr c t) = GuestbookLeaveR n gr c (g t)
+  trp :: MyPath -> Path Top Guestbook
+  trp mp = TopTopP_gb (f mp gb) where
+    f 0 _ = End
+    f n (Arrive _ g)    = GuestbookArriveP_tl $ f (n-1) g
+    f n (Leave _ _ _ g) = GuestbookLeaveP_tl $ f (n-1) g
+}

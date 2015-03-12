@@ -1,0 +1,208 @@
+list {Double} DL
+   visit 0
+      syn average :: {Double}
+      syn length :: {Double}
+      syn sum :: {Double}
+   alternative Cons
+      child hd :: {Double}
+      child tl :: DL
+      visit 0
+         childvisit tl
+         loc.length = @tl.length + 1
+         loc.sum = @tl.sum + @hd
+         lhs.average = @loc.sum / @loc.length
+         lhs.length = @loc.length
+         lhs.sum = @loc.sum
+   alternative Nil
+      visit 0
+         lhs.length = 0
+         lhs.sum = 0
+         lhs.average = 0
+nonterminal Guestbook
+   visit 0
+      syn signedIn :: {Set Name}
+      syn trueReviews :: DL
+   alternative Empty
+      visit 0
+         lhs.signedIn = Set.empty
+         loc.trueReviews = []
+         lhs.trueReviews = @loc.trueReviews
+   alternative Arrive
+      child name :: {Name}
+      child tl :: Guestbook
+      visit 0
+         childvisit tl
+         lhs.signedIn = Set.insert @name @tl.signedIn
+         loc.trueReviews = @tl.trueReviews
+         lhs.trueReviews = @loc.trueReviews
+   alternative Leave
+      child name :: {Name}
+      child grade :: {Double}
+      child review :: {String}
+      child tl :: Guestbook
+      visit 0
+         childvisit tl
+         lhs.signedIn = Set.delete @name @tl.signedIn
+         loc.trueReviews = if Set.member @name @tl.signedIn then (:) @grade @tl.trueReviews else @tl.trueReviews
+         lhs.trueReviews = @loc.trueReviews
+nonterminal Top
+   visit 0
+      syn average :: {Double}
+   alternative Top
+      child gb :: Guestbook
+      visit 0
+         childvisit gb
+         loc.inst_revs = @gb.trueReviews
+         child revs :: DL = @loc.inst_revs
+         childvisit revs
+         lhs.average = @revs.average
+
+-- Haskell code
+{-# LANGUAGE CPP #-}
+
+module Main where
+
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Control.Monad
+import Control.DeepSeq
+
+#if GATHER_STATS
+import System.IO.Unsafe (unsafePerformIO)
+import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef, IORef)
+#endif
+
+#if MEASURE_TIME
+import Criterion
+import Criterion.Main
+#endif
+
+type Name = String
+
+example :: Guestbook
+example = Leave "Bransen" 7.6 "I liked the fast internet connection" $ Leave "Dijkstra" 8 "The atmosphere is great for taking pictures!" $ Arrive "Dijkstra" $ Leave "Swierstra" 6 "Nice hotel, but the beds are too short" $ Arrive "Bransen" $ Arrive "Swierstra" $ Empty
+
+#if GATHER_STATS
+counterSem :: IORef Int
+counterSem = unsafePerformIO $ newIORef 0
+
+counterAG :: IORef Int
+counterAG = unsafePerformIO $ newIORef 0
+
+counterEQ :: IORef Int
+counterEQ = unsafePerformIO $ newIORef 0
+#endif
+
+tickSem, tickAG, tickEQ :: a -> a
+#if GATHER_STATS
+tickSem x = unsafePerformIO $ modifyIORef counterSem succ >> return x
+tickAG x = unsafePerformIO $ modifyIORef counterAG succ >> return x
+tickEQ x = unsafePerformIO $ modifyIORef counterEQ succ >> return x
+#else
+tickSem = id
+tickAG = id
+tickEQ = id
+#endif
+
+printStats, resetStats :: IO ()
+#if GATHER_STATS
+printStats = do
+  s <- readIORef counterSem
+  a <- readIORef counterAG
+  e <- readIORef counterEQ
+  putStrLn $ "Sem = " ++ show s ++ "; AG = " ++ show a ++ "; EQ = " ++ show e
+
+resetStats = writeIORef counterSem 0 >> writeIORef counterAG 0 >> writeIORef counterEQ 0
+#else
+printStats = return ()
+resetStats = return ()
+#endif
+
+-- Data types
+type MyPath = Int
+
+data MyGuestbookR
+  = Ref MyPath
+  | EmptyR
+  | ArriveR Name MyGuestbookR
+  | LeaveR Name Double String MyGuestbookR
+  deriving (Read, Show)
+
+type Change = (String, Int, MyGuestbookR)
+
+-- Parsing
+parseGuestbook :: String -> Guestbook
+parseGuestbook = parseEntry . lines
+
+parseEntry :: [String] -> Guestbook
+parseEntry [] = Empty
+parseEntry (s:ss) = case words s of
+  ["ARRIVE", n] -> Arrive n $ parseEntry ss
+  ("LEAVE":n:"-":g:"-":cs) -> Leave n (read g) (unwords cs) $ parseEntry ss
+
+parseChanges :: String -> [Change]
+parseChanges = map read . lines
+
+-- Invocation
+computeGrade :: Guestbook -> (Double, TTop Top)
+computeGrade g = ttop_v0 t t where
+  t = semTop $ Top g
+
+computeGradeI :: TTop Top -> (Path Top Guestbook, GuestbookR Top) -> (Double, TTop Top)
+computeGradeI t (p, r) = ttop_v0 t' t' where
+  t' = ttop_change t t (ttop_lookup t t) p r
+
+-- Main
+main :: IO ()
+main = do
+  f <- readFile "large_guestbook.txt"
+  let gb = parseGuestbook f
+  let (g,st) = computeGrade gb
+  resetStats
+  print g
+  printStats
+  f2 <- readFile "large_guestbook_changes.txt"
+  let chs = parseChanges f2
+  let chs' = map (translateChanges gb) chs
+  forM_ chs' $ \ch' -> do
+    let (g,st) = computeGrade gb
+    deepseq g $ return ()
+    resetStats
+    print $ fst $ computeGradeI st ch'
+    printStats
+#if MEASURE_TIME
+  let bi = nf (fst . computeGrade) gb
+--  benchmark bi -- trial run, to make sure memory is allocated and so on
+  defaultMain $
+    bench "initial" bi
+    : [ bench name $ nf (\(gb',ch') -> let (c1,incr) = computeGrade gb'
+                                       in  (c1,fst $ computeGradeI incr ch')) (gb, ch)
+      | ((name,_,_), ch) <- zip chs chs'
+      ]
+#endif
+
+translateChanges :: Guestbook -> Change -> (Path Top Guestbook, GuestbookR Top)
+translateChanges gb (_, p, r) = (trp p, g r) where
+  g :: MyGuestbookR -> GuestbookR Top
+  g (Ref p) = Guestbook_Ref (trp p)
+  g (EmptyR) = GuestbookEmptyR
+  g (ArriveR n t) = GuestbookArriveR n (g t)
+  g (LeaveR n gr c t) = GuestbookLeaveR n gr c (g t)
+  trp :: MyPath -> Path Top Guestbook
+  trp mp = TopTopP_gb (f mp gb) where
+    f 0 _ = End
+    f n (Arrive _ g)    = GuestbookArriveP_tl $ f (n-1) g
+    f n (Leave _ _ _ g) = GuestbookLeaveP_tl $ f (n-1) g
+
+st1 = semTop (Top example)
+(grade, st2) = ttop_v0 st1 st1
+
+{-
+path = Leave_tl (Leave_tl (Arrive_tl End))
+repl = Ref (Leave_tl (Leave_tl (Arrive_tl (Leave_tl End))))
+-}
+path = TopTopP_gb (GuestbookLeaveP_tl (GuestbookLeaveP_tl (GuestbookArriveP_tl End)))
+repl = Guestbook_Ref (TopTopP_gb (GuestbookLeaveP_tl (GuestbookLeaveP_tl (GuestbookArriveP_tl (GuestbookLeaveP_tl End)))))
+
+st3 = ttop_change st2 st2 (ttop_lookup st2 st2) path repl
+(grade2, st4) = ttop_v0 st3 st3
